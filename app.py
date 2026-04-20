@@ -1,0 +1,938 @@
+# Action Map — Clean (Actions + xT) — v2 (updated to use funnel-based xT measurement)
+import streamlit as st
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from mplsoccer import Pitch
+import pandas as pd
+import numpy as np
+from PIL import Image
+from io import BytesIO
+from matplotlib.lines import Line2D
+from matplotlib.patches import FancyArrowPatch, Rectangle
+from streamlit_image_coordinates import streamlit_image_coordinates
+from matplotlib.colors import Normalize, LinearSegmentedColormap
+from matplotlib.path import Path
+import math
+
+# ==========================
+# Page Configuration
+# ==========================
+st.set_page_config(layout="wide", page_title="Action Map — Clean (Actions + xT)")
+
+# ==========================
+# CSS
+# ==========================
+st.markdown(
+    """
+    <style>
+    /* Container spacing */
+    .small-metric { padding: 6px 8px; }
+
+    /* Labels (small) */
+    .small-metric .label {
+      font-size: 12px;
+      color: #ffffff;
+      margin-bottom: 3px;
+      opacity: 0.95;
+    }
+
+    /* Main value */
+    .small-metric .value {
+      font-size: 18px;
+      font-weight: 600;
+      color: #ffffff;
+    }
+
+    /* Delta / secondary text */
+    .small-metric .delta {
+      font-size: 11px;
+      color: #e6e6e6;
+      margin-top: 4px;
+    }
+
+    /* Section titles inside expanders */
+    .stats-section-title {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 6px;
+      color: #ffffff;
+    }
+
+    /* Expander headers */
+    .streamlit-expanderHeader {
+      color: #ffffff !important;
+    }
+
+    .streamlit-expander {
+      background: rgba(255,255,255,0.02);
+    }
+
+    /* ===== Filter sidebar background ===== */
+    .filter-panel {
+      background: linear-gradient(168deg, rgba(30, 39, 56, 0.92) 0%, rgba(22, 28, 40, 0.97) 100%);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 14px;
+      padding: 24px 18px 20px 18px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.25), 0 1px 4px rgba(0,0,0,0.12);
+      backdrop-filter: blur(6px);
+    }
+
+    .filter-panel h3 {
+      font-size: 15px;
+      color: #c8d6e5;
+      letter-spacing: 0.5px;
+      margin-bottom: 8px;
+    }
+
+    .filter-panel .filter-divider {
+      border: none;
+      border-top: 1px solid rgba(255,255,255,0.07);
+      margin: 14px 0;
+    }
+
+    .stSubheader { color: #ffffff !important; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+def small_metric(label: str, value: str, delta: str | None = None):
+    html = f"""
+    <div class="small-metric">
+      <div class="label">{label}</div>
+      <div class="value">{value}</div>
+    """
+    if delta is not None:
+        html += f'<div class="delta">{delta}</div>'
+    html += "</div>"
+    st.markdown(html, unsafe_allow_html=True)
+
+
+# ==========================
+# Configuration / constants
+# ==========================
+st.title("Action Map — Clean (Actions + xT)")
+
+FIELD_X, FIELD_Y = 120.0, 80.0
+HALF_LINE_X = FIELD_X / 2
+FINAL_THIRD_LINE_X = 80
+
+LANE_LEFT_MIN = 53.33
+LANE_RIGHT_MAX = 26.67
+
+NX, NY = 16, 12
+LATERAL_MIN_DIST = 12.0
+
+# Colours
+COLOR_TOP = "#2F80ED"        # top ΔxT (blue)
+COLOR_OTHER = "#bfc4ca"      # other successful (light gray)
+COLOR_FAIL = "#FF6B6B"       # failed (light red)
+
+# Draw sizes
+START_DOT_SIZE = 28  # slightly decreased
+FIG_W, FIG_H = 7.9, 5.3
+FIG_DPI = 110
+
+# ==========================
+# New xT computation (funnel + attenuation + blending)
+# We'll compute a high-res continuous xT, apply funnel-based bonus with attenuation,
+# blend around the funnel border, then aggregate to the app's NXxNY grid.
+# The result is cached to avoid recomputation on each rerun.
+# ==========================
+@st.cache_data(show_spinner=False)
+def compute_xt_grid(
+    NX=16,
+    NY=12,
+    sub=24,                       # subdivisions per coarse cell (higher => more precise, slower)
+    goal_width=11.0,
+    penalty_depth=18.5,
+    penalty_width=45.32,
+    prox_w=0.65,
+    central_w=0.35,
+    att_min=0.45,
+    att_prox_weight=0.7,
+    att_central_weight=0.3,
+    band_width_m=8.0,
+    blur_window_m=6.0,
+):
+    # Build high-res grid
+    ncols_hr = NX * sub
+    nrows_hr = NY * sub
+
+    x_edges_hr = np.linspace(0.0, FIELD_X, ncols_hr + 1)
+    y_edges_hr = np.linspace(0.0, FIELD_Y, nrows_hr + 1)
+    x_centers_hr = (x_edges_hr[:-1] + x_edges_hr[1:]) / 2.0
+    y_centers_hr = (y_edges_hr[:-1] + y_edges_hr[1:]) / 2.0
+    Xc_hr, Yc_hr = np.meshgrid(x_centers_hr, y_centers_hr)
+
+    # base continuous xT (same form as original)
+    xp = 0.01 + (Xc_hr / FIELD_X) * (1.0 - 0.01)
+    yc = 1.0 - np.abs((Yc_hr / FIELD_Y) - 0.5) * 2.0
+    XT_RAW_hr = xp * (0.8 + 0.2 * yc)
+    # normalize base
+    XT_RAW_hr = (XT_RAW_hr - XT_RAW_hr.min()) / (XT_RAW_hr.max() - XT_RAW_hr.min() + 1e-12)
+
+    # define funnel polygon (same geometry as you set)
+    center_y = FIELD_Y / 2.0
+    left_goal_post = (FIELD_X, center_y - goal_width / 2.0)
+    right_goal_post = (FIELD_X, center_y + goal_width / 2.0)
+    x_big = FIELD_X - penalty_depth
+    big_top_corner = (x_big, center_y + penalty_width / 2.0)
+    big_bottom_corner = (x_big, center_y - penalty_width / 2.0)
+    funnel_vertices = [left_goal_post, big_bottom_corner, big_top_corner, right_goal_post]
+    funnel_path = Path(funnel_vertices)
+
+    # rasterize funnel mask
+    pts = np.column_stack([Xc_hr.ravel(), Yc_hr.ravel()])
+    inside_flags = funnel_path.contains_points(pts).reshape(Xc_hr.shape)
+
+    # proximity & centrality maps
+    goal_center = (FIELD_X, center_y)
+    D_hr = np.hypot(goal_center[0] - Xc_hr, goal_center[1] - Yc_hr)
+    max_dist = np.hypot(FIELD_X - 0.0, FIELD_Y / 2.0)
+    prox_hr = 1.0 - np.clip(D_hr / max_dist, 0.0, 1.0)
+    central_hr = 1.0 - np.clip(np.abs((Yc_hr - center_y) / center_y), 0.0, 1.0)
+
+    # unit bonus (weight=1) inside funnel
+    unit_bonus_hr = (prox_w * prox_hr + central_w * central_hr) * inside_flags.astype(float)
+
+    # attenuation factor (reduces bonus in far / lateral positions)
+    att_score_hr = (att_prox_weight * prox_hr + att_central_weight * central_hr)
+    att_hr = att_min + (1.0 - att_min) * att_score_hr
+    att_hr = np.clip(att_hr, att_min, 1.0)
+    att_effective_hr = att_hr * inside_flags.astype(float)
+    unit_bonus_eff_hr = unit_bonus_hr * att_effective_hr
+
+    # compute minimal weight to ensure inside_min > outside_max (min necessary)
+    base_hr = XT_RAW_hr
+    inside_base_vals = base_hr[inside_flags]
+    outside_base_vals = base_hr[~inside_flags]
+    outside_max = outside_base_vals.max() if outside_base_vals.size > 0 else -np.inf
+
+    if inside_base_vals.size == 0:
+        chosen_weight = 0.0
+    else:
+        base_inside_min = inside_base_vals.min()
+        unit_eff_inside = unit_bonus_eff_hr[inside_flags]
+        min_unit_eff_inside = unit_eff_inside.min() if unit_eff_inside.size > 0 else 0.0
+        if min_unit_eff_inside <= 1e-12:
+            chosen_weight = 0.0
+        else:
+            required_weight = (outside_max + 1e-12 - base_inside_min) / min_unit_eff_inside
+            chosen_weight = max(0.0, required_weight) + 1e-12
+
+    # apply bonus with chosen_weight
+    bonus_hr = chosen_weight * unit_bonus_eff_hr
+    XT_MOD_hr = base_hr + bonus_hr
+
+    # small fallback shift if still violated (rare)
+    inside_vals = XT_MOD_hr[inside_flags]
+    outside_vals = XT_MOD_hr[~inside_flags]
+    outside_max = outside_vals.max() if outside_vals.size > 0 else -np.inf
+    inside_min = inside_vals.min() if inside_vals.size > 0 else np.inf
+    if inside_min <= outside_max + 1e-12:
+        shift = (outside_max + 1e-12) - inside_min
+        XT_MOD_hr[inside_flags] = XT_MOD_hr[inside_flags] + shift
+
+    # --- smoothing: box blur used as blend reference
+    px_w = FIELD_X / ncols_hr
+    px_h = FIELD_Y / nrows_hr
+    rx = max(1, int(round((blur_window_m / px_w) / 2.0)))
+    ry = max(1, int(round((blur_window_m / px_h) / 2.0)))
+
+    def box_blur_2d(arr, rx, ry):
+        H, W = arr.shape
+        pad = ((ry, ry), (rx, rx))
+        a = np.pad(arr, pad_width=pad, mode='edge').astype(np.float64)
+        ii = a.cumsum(axis=0).cumsum(axis=1)
+        s = ii[2*ry : 2*ry + H, 2*rx : 2*rx + W].copy()
+        s += ii[0:H, 0:W]
+        s -= ii[0:H, 2*rx : 2*rx + W]
+        s -= ii[2*ry : 2*ry + H, 0:W]
+        return s / ((2*ry+1) * (2*rx+1))
+
+    smoothed_hr = box_blur_2d(XT_MOD_hr, rx, ry)
+
+    # compute distance to funnel boundary (sampling boundary densely)
+    boundary_pts = []
+    for i in range(len(funnel_vertices)):
+        a = funnel_vertices[i]
+        b = funnel_vertices[(i + 1) % len(funnel_vertices)]
+        dx = b[0] - a[0]
+        dy = b[1] - a[1]
+        edge_len = math.hypot(dx, dy)
+        num = max(2, int(round(edge_len / 0.5)))
+        for t in np.linspace(0.0, 1.0, num, endpoint=False):
+            px = a[0] + dx * t
+            py = a[1] + dy * t
+            boundary_pts.append((px, py))
+    boundary_pts = np.array(boundary_pts)
+
+    flat_X = Xc_hr.ravel()
+    flat_Y = Yc_hr.ravel()
+    N = flat_X.size
+    min_d2 = np.full(N, np.inf, dtype=np.float64)
+    for bp in boundary_pts:
+        dx = flat_X - bp[0]
+        dy = flat_Y - bp[1]
+        d2 = dx * dx + dy * dy
+        mask = d2 < min_d2
+        if mask.any():
+            min_d2[mask] = d2[mask]
+    min_dist = np.sqrt(min_d2).reshape(Xc_hr.shape)
+
+    abs_dist = min_dist
+    w = np.clip(abs_dist / band_width_m, 0.0, 1.0)
+    XT_BLENDED_hr = w * XT_MOD_hr + (1.0 - w) * smoothed_hr
+    XT_COMBINED_hr = XT_BLENDED_hr
+
+    # final tiny shift safeguard
+    inside_vals_final_pre = XT_COMBINED_hr[inside_flags]
+    outside_vals_final_pre = XT_COMBINED_hr[~inside_flags]
+    outside_max_pre = outside_vals_final_pre.max() if outside_vals_final_pre.size > 0 else -np.inf
+    inside_min_pre = inside_vals_final_pre.min() if inside_vals_final_pre.size > 0 else np.inf
+    if inside_min_pre <= outside_max_pre + 1e-12:
+        shift = (outside_max_pre + 1e-12) - inside_min_pre
+        XT_COMBINED_hr[inside_flags] += shift
+
+    # normalize final high-res field
+    hr_min = XT_COMBINED_hr.min()
+    hr_max = XT_COMBINED_hr.max()
+    XT_FINAL_hr = (XT_COMBINED_hr - hr_min) / (hr_max - hr_min + 1e-12)
+
+    # aggregate to coarse NXxNY by averaging blocks
+    XT_coarse = np.zeros((NY, NX))
+    for iy in range(NY):
+        for ix in range(NX):
+            r0 = iy * sub
+            r1 = (iy + 1) * sub
+            c0 = ix * sub
+            c1 = (ix + 1) * sub
+            block = XT_FINAL_hr[r0:r1, c0:c1]
+            XT_coarse[iy, ix] = block.mean()
+
+    # normalize coarse again (safe)
+    XT_coarse = (XT_coarse - XT_coarse.min()) / (XT_coarse.max() - XT_coarse.min() + 1e-12)
+
+    return XT_coarse, XT_FINAL_hr, inside_flags
+
+# Replace old static XT_GRID with computed one
+XT_GRID, XT_FINAL_hr_cached, INSIDE_MASK_FINAL_HR = compute_xt_grid(
+    NX=NX, NY=NY, sub=24,
+    goal_width=11.0, penalty_depth=18.5, penalty_width=45.32,
+    prox_w=0.65, central_w=0.35, att_min=0.45,
+    att_prox_weight=0.7, att_central_weight=0.3,
+    band_width_m=8.0, blur_window_m=6.0
+)
+
+# Keep xt lookup semantics: zone_index and xt_value
+def zone_index(x, y):
+    x = np.clip(x, 0, FIELD_X - 1e-9)
+    y = np.clip(y, 0, FIELD_Y - 1e-9)
+    ix = int((x / FIELD_X) * NX)
+    iy = int((y / FIELD_Y) * NY)
+    return ix, iy
+
+def xt_value(x, y):
+    ix, iy = zone_index(x, y)
+    return float(XT_GRID[iy, ix])
+
+# ==========================
+# DATA (user-provided actions)  — unchanged
+# ==========================
+matches_data = {
+    "Ali vs Vancouver": [
+        # Positivos
+        ("ACTION WON", 50.03, 5.76, 48.86, 14.07, None),
+        ("ACTION WON", 42.05, 4.26, 65.82, 19.39, None),
+        ("ACTION WON", 53.68, 12.57, 39.72, 28.20, None),
+        ("ACTION WON", 43.88, 37.17, 44.54, 44.65, None),
+        ("ACTION WON", 76.29, 23.21, 65.65, 22.38, None),
+        ("ACTION WON", 78.62, 25.54, 87.26, 26.37, None),
+        ("ACTION WON", 67.48, 5.76, 76.96, 6.42, None),
+        ("ACTION WON", 61.83, 3.43, 111.20, 9.75, None),
+        ("ACTION WON", 83.27, 2.93, 118.51, 19.89, None),
+        ("ACTION WON", 97.90, 6.75, 111.53, 9.91, None),
+        ("ACTION WON", 114.03, 1.93, 107.71, 12.57, None),
+        ("ACTION WON", 98.23, 5.59, 90.09, 7.58, None),
+        ("ACTION WON", 96.57, 5.92, 91.92, 14.73, None),
+        ("ACTION WON", 87.43, 12.24, 78.78, 9.41, None),
+        ("ACTION WON", 77.62, 1.93, 72.30, 3.93, None),
+        ("ACTION WON", 79.28, 5.59, 70.81, 2.26, None),
+        ("ACTION WON", 62.83, 3.43, 79.62, 7.25, None),
+        ("ACTION WON", 53.18, 9.41, 68.98, 13.74, None),
+        ("ACTION WON", 51.69, 4.76, 40.38, 8.58, None),
+        # Negativos
+        ("ACTION LOST", 116.35, 2.93, 118.68, 11.74, None),
+        ("ACTION LOST", 107.88, 10.58, 109.54, 39.83, None),
+        ("ACTION LOST", 86.10, 3.43, 87.59, 4.09, None),
+        ("ACTION LOST", 73.46, 2.43, 75.13, 3.43, None),
+        ("ACTION LOST", 53.18, 2.60, 70.47, 8.58, None),
+        ("ACTION LOST", 50.19, 6.09, 67.15, 10.91, None),
+        ("ACTION LOST", 47.70, 6.09, 55.01, 14.90, None),
+        ("ACTION LOST", 45.87, 35.84, 79.28, 50.14, None),
+        ("ACTION LOST", 54.51, 4.43, 54.35, 15.56, None),
+        ("ACTION LOST", 64.99, 0.94, 70.97, 1.93, None),
+        ("ACTION LOST", 87.43, 7.25, 87.43, 20.88, None),
+        ("ACTION LOST", 93.25, 7.92, 119.18, 39.67, None),
+        ("ACTION LOST", 99.90, 13.57, 98.90, 23.21, None),
+    ],
+    "Vs Dallas": [
+        # Positivos
+        ("ACTION WON", 56.01, 3.43, 45.21, 8.08, None),
+        ("ACTION WON", 44.04, 2.10, 38.22, 7.25, None),
+        ("ACTION WON", 46.54, 11.24, 35.56, 9.91, None),
+        ("ACTION WON", 41.22, 10.91, 50.03, 15.23, None),
+        ("ACTION WON", 96.57, 2.26, 104.05, 28.86, None),
+        ("ACTION WON", 82.28, 22.55, 106.55, 1.43, None),
+        ("ACTION WON", 78.78, 21.05, 84.94, 20.72, None),
+        ("ACTION WON", 75.79, 18.89, 86.60, 55.63, None),
+        ("ACTION WON", 96.07, 39.00, 101.39, 39.00, None),
+        # Negativos
+        ("ACTION LOST", 88.09, 12.24, 87.43, 4.26, None),
+        ("ACTION LOST", 78.62, 4.76, 87.59, 1.60, None),
+        ("ACTION LOST", 53.85, 1.60, 52.69, 1.10, None),
+        ("ACTION LOST", 52.85, 2.93, 62.49, 13.07, None),
+        ("ACTION LOST", 40.22, 22.55, 91.09, 25.54, None),
+    ],
+    "vs Sagoya": [
+        # Sucesso
+        ("ACTION WON", 116.19, 14.40, 109.54, 29.36, None),
+        ("ACTION WON", 91.92, 3.43, 85.27, 7.75, None),
+        ("ACTION WON", 57.51, 6.09, 56.01, 26.70, None),
+        ("ACTION WON", 118.35, 1.43, 108.87, 46.82, None),
+        ("ACTION WON", 103.72, 40.83, 105.05, 42.49, None),
+        ("ACTION WON", 86.93, 4.76, 107.88, 31.36, None),
+        ("ACTION WON", 65.82, 40.50, 79.95, 30.86, None),
+        ("ACTION WON", 75.79, 8.08, 74.79, 27.53, None),
+        ("ACTION WON", 74.46, 5.09, 71.64, 14.07, None),
+        ("ACTION WON", 67.31, 2.10, 61.83, 10.91, None),
+        ("ACTION WON", 67.65, 5.92, 51.52, 8.08, None),
+        ("ACTION WON", 62.49, 2.60, 66.65, 9.41, None),
+        ("ACTION WON", 47.03, 2.43, 50.03, 15.73, None),
+        ("ACTION WON", 37.23, 10.24, 53.35, 12.57, None),
+        ("ACTION WON", 23.59, 2.76, 32.07, 4.92, None),
+        ("ACTION WON", 20.94, 14.23, 33.24, 7.25, None),
+        ("ACTION WON", 14.62, 18.22, 6.64, 37.01, None),
+        # Falha
+        ("ACTION LOST", 51.19, 3.59, 117.68, 14.07, None),
+        ("ACTION LOST", 65.15, 6.59, 113.86, 20.05, None),
+        ("ACTION LOST", 90.92, 2.76, 94.24, 4.76, None),
+        ("ACTION LOST", 97.74, 7.09, 101.56, 20.05, None),
+        ("ACTION LOST", 84.44, 6.59, 91.09, 13.90, None),
+    ],
+    "Vs Busan Park": [
+        # Sucesso
+        ("ACTION WON", 114.52, 19.05, 103.72, 21.22, None),
+        ("ACTION WON", 92.25, 21.88, 112.20, 24.21, None),
+        ("ACTION WON", 99.90, 23.21, 90.59, 24.87, None),
+        ("ACTION WON", 86.93, 2.10, 82.61, 10.74, None),
+        ("ACTION WON", 85.93, 4.92, 94.41, 32.69, None),
+        ("ACTION WON", 89.59, 3.26, 80.95, 26.87, None),
+        ("ACTION WON", 84.27, 10.74, 76.12, 3.59, None),
+        ("ACTION WON", 54.51, 2.76, 52.85, 17.56, None),
+        ("ACTION WON", 56.01, 9.08, 46.04, 8.75, None),
+        ("ACTION WON", 20.94, 2.43, 2.15, 7.58, None),
+        ("ACTION WON", 96.90, 10.41, 111.03, 35.68, None),
+        ("ACTION WON", 88.26, 33.35, 97.74, 8.08, None),
+        ("ACTION WON", 51.02, 18.39, 66.48, 15.23, None),
+        ("ACTION WON", 34.57, 56.12, 69.31, 5.92, None),
+        ("ACTION WON", 53.52, 33.35, 65.15, 45.98, None),
+        ("ACTION WON", 46.37, 51.47, 85.60, 46.48, None),
+        ("ACTION WON", 88.26, 47.98, 107.21, 56.29, None),
+        ("ACTION WON", 89.42, 50.31, 100.89, 65.10, None),
+        # Falha
+        ("ACTION LOST", 113.53, 9.25, 119.01, 38.67, None),
+        ("ACTION LOST", 63.16, 37.34, 80.95, 37.67, None),
+        ("ACTION LOST", 58.34, 16.56, 67.65, 26.04, None),
+        ("ACTION LOST", 67.81, 6.59, 75.96, 31.52, None),
+        ("ACTION LOST", 34.57, 57.95, 49.03, 55.63, None),
+    ],
+    "Vs Atlanta": [
+        # Sucesso
+        ("ACTION WON", 95.08, 11.57, 94.41, 0.44, None),
+        ("ACTION WON", 54.68, 14.23, 49.36, 19.22, None),
+        ("ACTION WON", 33.74, 0.60, 28.42, 7.42, None),
+        ("ACTION WON", 38.06, 10.24, 20.27, 24.04, None),
+        ("ACTION WON", 15.28, 11.41, 3.48, 30.52, None),
+        ("ACTION WON", 26.25, 35.68, 32.07, 41.83, None),
+        ("ACTION WON", 53.85, 44.65, 80.95, 51.30, None),
+        ("ACTION WON", 72.97, 36.18, 98.23, 65.60, None),
+        ("ACTION WON", 102.56, 66.76, 93.08, 47.31, None),
+        # Falha
+        ("ACTION LOST", 67.81, 69.59, 70.97, 78.73, None),
+        ("ACTION LOST", 31.91, 2.43, 41.05, 13.40, None),
+    ],
+}
+
+# ==========================
+# Helpers, DataFrames, Stats, Draw functions
+# (unchanged logic; xt_start/xt_end derived from new XT_GRID)
+# ==========================
+def has_video_value(v) -> bool:
+    return pd.notna(v) and str(v).strip() != ""
+
+def classify_action_direction(x_start, y_start, x_end, y_end) -> str:
+    dx = x_end - x_start
+    dy = y_end - y_start
+    dist = np.sqrt(dx ** 2 + dy ** 2)
+    angle_deg = np.degrees(np.arctan2(abs(dy), dx))
+    if angle_deg <= 45.0:
+        return "forward"
+    elif angle_deg >= 135.0:
+        return "backward"
+    else:
+        if dist > LATERAL_MIN_DIST:
+            return "lateral"
+        else:
+            if dx >= 0:
+                return "forward"
+            else:
+                return "backward"
+
+# Build DataFrames
+dfs_by_match = {}
+for match_name, events in matches_data.items():
+    dfm = pd.DataFrame(events, columns=["type", "x_start", "y_start", "x_end", "y_end", "video"])
+    dfm["match"] = match_name
+    dfm["number"] = np.arange(1, len(dfm) + 1)
+    dfm["is_won"] = dfm["type"].str.contains("WON", case=False)
+    dfm["outcome"] = np.where(dfm["is_won"], "successful", "failed")
+    dfm["direction"] = dfm.apply(lambda row: classify_action_direction(row["x_start"], row["y_start"], row["x_end"], row["y_end"]), axis=1)
+    dfm["is_forward"] = dfm["direction"] == "forward"
+    dfm["is_backward"] = dfm["direction"] == "backward"
+    dfm["is_lateral"] = dfm["direction"] == "lateral"
+    # xt_start/xt_end use the new XT_GRID via xt_value()
+    dfm["xt_start"] = dfm.apply(lambda r: xt_value(r["x_start"], r["y_start"]), axis=1)
+    dfm["xt_end"] = dfm.apply(lambda r: xt_value(r["x_end"], r["y_end"]), axis=1)
+    dfm["delta_xt"] = np.where(dfm["outcome"].eq("successful"), dfm["xt_end"] - dfm["xt_start"], 0.0)
+    dfm["action_distance"] = np.sqrt((dfm["x_end"] - dfm["x_start"]) ** 2 + (dfm["y_end"] - dfm["y_start"]) ** 2)
+    dfs_by_match[match_name] = dfm
+
+df_all = pd.concat(dfs_by_match.values(), ignore_index=True)
+full_data = {"All Matches": df_all}
+full_data.update(dfs_by_match)
+
+def compute_stats(df: pd.DataFrame) -> dict:
+    total_actions = len(df)
+    successful = int(df["is_won"].sum())
+    unsuccessful = total_actions - successful
+    accuracy = (successful / total_actions * 100.0) if total_actions else 0.0
+    forward_total = int(df["is_forward"].sum())
+    backward_total = int(df["is_backward"].sum())
+    lateral_total = int(df["is_lateral"].sum())
+    # xT metrics (only for successful actions)
+    pos_mask = (df["outcome"] == "successful") & (df["delta_xt"] > 0)
+    pos_count = int(pos_mask.sum())
+    pos_sum = float(df.loc[pos_mask, "delta_xt"].sum()) if pos_count else 0.0
+    pos_mean = float(df.loc[pos_mask, "delta_xt"].mean()) if pos_count else 0.0
+    pos_pct = (pos_count / total_actions * 100.0) if total_actions else 0.0
+    # Top 5 positive ΔxT table (successful)
+    top5_df = pd.DataFrame()
+    if pos_count:
+        top5_df = df.loc[pos_mask].sort_values("delta_xt", ascending=False).head(5)[
+            ["number", "type", "x_start", "y_start", "x_end", "y_end", "xt_start", "xt_end", "delta_xt"]
+        ].reset_index(drop=True)
+    # Failed actions xT "contrário": loss of xT opportunity measured by xt_start at failure
+    failed_mask = df["outcome"] == "failed"
+    failed_count = int(failed_mask.sum())
+    failed_xt_lost_sum = float(df.loc[failed_mask, "xt_start"].sum()) if failed_count else 0.0
+    failed_xt_lost_mean = float(df.loc[failed_mask, "xt_start"].mean()) if failed_count else 0.0
+    return {
+        "total_actions": total_actions,
+        "successful_actions": successful,
+        "unsuccessful_actions": unsuccessful,
+        "accuracy_pct": round(accuracy, 2),
+        "forward_total": forward_total,
+        "backward_total": backward_total,
+        "lateral_total": lateral_total,
+        "positive_xt_count": pos_count,
+        "positive_xt_sum": round(pos_sum, 4),
+        "positive_xt_mean": round(pos_mean, 4),
+        "positive_xt_pct": round(pos_pct, 2),
+        "top5_positive_table": top5_df,
+        "failed_count": failed_count,
+        "failed_xt_lost_sum": round(failed_xt_lost_sum, 4),
+        "failed_xt_lost_mean": round(failed_xt_lost_mean, 4),
+    }
+
+# ==========================
+# Draw functions (clean map: no end 'x', smaller start dot)
+# (unchanged)
+# ==========================
+def draw_action_map(df: pd.DataFrame, title: str, top_n_highlight: int = 20):
+    pitch = Pitch(pitch_type="statsbomb", pitch_color="#1a1a2e", line_color="#ffffff", line_alpha=0.95)
+    fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
+    fig.set_facecolor("#1a1a2e")
+    fig.set_dpi(FIG_DPI)
+    ax.axvline(x=FINAL_THIRD_LINE_X, color="#FFD54F", linewidth=1.0, alpha=0.20)
+    ax.axvline(x=HALF_LINE_X, color="#ffffff", linewidth=0.6, alpha=0.12, linestyle="--")
+
+    # identify top N (by delta_xt among successful) within the provided df
+    top_idxs = set()
+    if not df.empty:
+        df_success = df[df["outcome"] == "successful"]
+        if not df_success.empty:
+            top_idxs = set(df_success.sort_values("delta_xt", ascending=False).head(top_n_highlight).index.tolist())
+
+    for idx, row in df.iterrows():
+        is_lost = not row["is_won"]
+        # color & alpha
+        if is_lost:
+            color = COLOR_FAIL
+            alpha = 0.88
+        else:
+            if idx in top_idxs:
+                color = COLOR_TOP
+                alpha = 0.95
+            else:
+                color = COLOR_OTHER
+                alpha = 0.20
+        # arrows without end marker
+        pitch.arrows(row["x_start"], row["y_start"], row["x_end"], row["y_end"],
+                     color=color, width=1.6, headwidth=2.5, headlength=2.5,
+                     ax=ax, zorder=3, alpha=alpha)
+        # start dot smaller and less dominant
+        if has_video_value(row["video"]):
+            pitch.scatter(row["x_start"], row["y_start"], s=68, marker="o", facecolors="none",
+                          edgecolors="#FFD54F", linewidths=2.0, ax=ax, zorder=5, alpha=alpha)
+        pitch.scatter(row["x_start"], row["y_start"], s=START_DOT_SIZE, marker="o", color=color,
+                      edgecolors="white", linewidths=0.7, ax=ax, zorder=6, alpha=alpha)
+
+    ax.set_title(title, fontsize=12, color="#ffffff", pad=8)
+    legend_elements = [
+        Line2D([0], [0], color=COLOR_TOP, lw=2.5, label=f"Top ΔxT (highlight)"),
+        Line2D([0], [0], color=COLOR_OTHER, lw=2.5, label="Other successful"),
+        Line2D([0], [0], color=COLOR_FAIL, lw=2.5, label="Failed"),
+    ]
+    legend = ax.legend(handles=legend_elements, loc="upper left", bbox_to_anchor=(0.01, 0.99),
+                       frameon=True, facecolor="#1a1a2e", edgecolor="#444466", shadow=False,
+                       fontsize="x-small", labelspacing=0.5, borderpad=0.5)
+    for txt in legend.get_texts():
+        txt.set_color("white")
+    legend.get_frame().set_alpha(0.92)
+    arrow = FancyArrowPatch((0.45, 0.05), (0.55, 0.05), transform=fig.transFigure,
+                           arrowstyle="-|>", mutation_scale=15, linewidth=2, color="#cccccc")
+    fig.patches.append(arrow)
+    fig.text(0.5, 0.02, "Attack Direction", ha="center", va="center", fontsize=9, color="#cccccc")
+    fig.tight_layout()
+    fig.canvas.draw()
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=FIG_DPI, facecolor=fig.get_facecolor())
+    buf.seek(0)
+    img_obj = Image.open(buf)
+    return img_obj, ax, fig
+
+def draw_corridor_heatmap(df: pd.DataFrame, title: str = "Zone Heatmap — Completed Actions"):
+    df_success = df[df["is_won"]].copy()
+    x_bins = np.linspace(0.0, FIELD_X, 7)
+    left_y0, left_y1 = LANE_LEFT_MIN, FIELD_Y
+    right_y0, right_y1 = 0.0, LANE_RIGHT_MAX
+    center_y0, center_y1 = LANE_RIGHT_MAX, LANE_LEFT_MIN
+    corridors = {"left": (left_y0, left_y1), "center": (center_y0, center_y1), "right": (right_y0, right_y1)}
+    counts = {}
+    for cname, (y0, y1) in corridors.items():
+        arr = np.zeros(6, dtype=int)
+        for i in range(6):
+            x0, x1 = x_bins[i], x_bins[i + 1]
+            mask = ((df_success["x_end"] >= x0) & (df_success["x_end"] < x1)
+                    & (df_success["y_end"] >= y0) & (df_success["y_end"] < y1))
+            arr[i] = int(mask.sum())
+        counts[cname] = arr
+    all_vals = np.concatenate([counts[c] for c in counts]) if counts else np.array([0])
+    vmax = max(1, int(all_vals.max()))
+    pitch = Pitch(pitch_type="statsbomb", pitch_color="#1a1a2e", line_color="#ffffff", line_alpha=0.95)
+    fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
+    fig.set_facecolor("#1a1a2e")
+    fig.set_dpi(FIG_DPI)
+    cmap = LinearSegmentedColormap.from_list("white_red", ["#ffffff", "#ffecec", "#ffbfbf", "#ff8080", "#ff3b3b", "#ff0000"])
+    norm = Normalize(vmin=0, vmax=vmax)
+    text_light_threshold = max(1, vmax * 0.35)
+    for cname, (y0, y1) in corridors.items():
+        arr = counts[cname]
+        for i in range(6):
+            x0, x1 = x_bins[i], x_bins[i + 1]
+            value = arr[i]
+            color = cmap(norm(value))
+            rect = Rectangle((x0, y0), x1 - x0, y1 - y0, facecolor=color, edgecolor=(1.0, 1.0, 1.0, 0.12),
+                             linewidth=0.6, alpha=0.95, zorder=2)
+            ax.add_patch(rect)
+            cx = (x0 + x1) / 2.0
+            cy = (y0 + y1) / 2.0
+            text_color = "#000000" if value <= text_light_threshold else "#ffffff"
+            fontw = "700" if value >= vmax * 0.5 else "600"
+            ax.text(cx, cy, str(value), ha="center", va="center", color=text_color, fontsize=11, fontweight=fontw, zorder=4)
+    ax.set_title(title, fontsize=12, color="#ffffff", pad=8)
+    ax.axhline(y=LANE_LEFT_MIN, color="#ffffff", linewidth=0.5, alpha=0.15, linestyle="--", zorder=3)
+    ax.axhline(y=LANE_RIGHT_MAX, color="#ffffff", linewidth=0.5, alpha=0.15, linestyle="--", zorder=3)
+    arrow = FancyArrowPatch((0.45, 0.05), (0.55, 0.05), transform=fig.transFigure, arrowstyle="-|>", mutation_scale=15, linewidth=2, color="#cccccc")
+    fig.patches.append(arrow)
+    fig.text(0.5, 0.02, "Attack Direction", ha="center", va="center", fontsize=9, color="#cccccc")
+    fig.tight_layout()
+    fig.canvas.draw()
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=FIG_DPI, facecolor=fig.get_facecolor())
+    buf.seek(0)
+    img_obj = Image.open(buf)
+    return img_obj, ax, fig
+
+# ==========================
+# Layout: Filters / Field / Stats
+# (rest of app unchanged; uses XT_GRID via xt_value)
+# ==========================
+col_filters, col_field, col_stats = st.columns([0.9, 2, 1], gap="large")
+
+with col_filters:
+    st.markdown('<div class="filter-panel">', unsafe_allow_html=True)
+    st.markdown("### 🏟️ Match Selection")
+    selected_match = st.selectbox("Choose the match", list(full_data.keys()), index=0)
+    st.markdown('<hr class="filter-divider">', unsafe_allow_html=True)
+    st.markdown("### 🎯 Action Filter (map will SHOW ONLY the selected set)")
+    action_filter = st.radio(
+        "Filter actions to display",
+        [
+            "All Actions",
+            "Top N actions (ΔxT)",
+            "Unsuccessful actions",
+            "Successful actions",
+            "Positive xT only (successful)",
+            "High xT only (successful)"
+        ],
+        index=0,  # default All Actions
+    )
+    st.markdown("<div style='margin-top:8px; color:#e6e6e6;'>Top N / High xT controls</div>", unsafe_allow_html=True)
+    top_n = st.number_input("Top N (for Top N actions)", min_value=1, max_value=100, value=20, step=1)
+    xt_threshold = st.slider("High xT threshold (ΔxT) — show successful actions with ΔxT ≥",
+                             min_value=0.0, max_value=0.5, value=0.03, step=0.005)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# session state for heat selection
+if "heat_selection" not in st.session_state:
+    st.session_state["heat_selection"] = None
+if "last_match" not in st.session_state:
+    st.session_state["last_match"] = selected_match
+if "last_filter" not in st.session_state:
+    st.session_state["last_filter"] = action_filter
+
+# Clear heat selection automatically if match or filter changed
+if st.session_state["last_match"] != selected_match:
+    st.session_state["heat_selection"] = None
+    st.session_state["last_match"] = selected_match
+if st.session_state["last_filter"] != action_filter:
+    st.session_state["heat_selection"] = None
+    st.session_state["last_filter"] = action_filter
+
+with col_field:
+    df_base = full_data[selected_match].copy()
+
+    # Apply selected display filter (this determines which rows are drawn)
+    if action_filter == "All Actions":
+        df_base = df_base.reset_index(drop=True)
+    elif action_filter == "Top N actions (ΔxT)":
+        df_success = df_base[df_base["outcome"] == "successful"].copy()
+        if not df_success.empty:
+            df_sorted = df_success.sort_values("delta_xt", ascending=False).head(int(top_n))
+            df_base = df_sorted.reset_index(drop=True)
+        else:
+            df_base = df_success.reset_index(drop=True)
+    elif action_filter == "Unsuccessful actions":
+        df_base = df_base[df_base["outcome"] == "failed"].reset_index(drop=True)
+    elif action_filter == "Successful actions":
+        df_base = df_base[df_base["outcome"] == "successful"].reset_index(drop=True)
+    elif action_filter == "Positive xT only (successful)":
+        df_base = df_base[(df_base["outcome"] == "successful") & (df_base["delta_xt"] > 0)].reset_index(drop=True)
+    elif action_filter == "High xT only (successful)":
+        df_base = df_base[(df_base["outcome"] == "successful") & (df_base["delta_xt"] >= float(xt_threshold))].reset_index(drop=True)
+
+    DISPLAY_WIDTH = 780
+    pass_map_placeholder = st.empty()
+
+    # ---- Heatmap (render & handle click first) ----
+    st.markdown('<h4 style="color:#ffffff; margin:6px 0 6px 0;">Zone Heatmap</h4>', unsafe_allow_html=True)
+    heat_img, hax, hfig = draw_corridor_heatmap(df_base)
+    heat_click = streamlit_image_coordinates(heat_img, width=DISPLAY_WIDTH)
+
+    if heat_click is not None:
+        real_w, real_h = heat_img.size
+        disp_w = heat_click["width"]
+        disp_h = heat_click["height"]
+        pixel_x = heat_click["x"] * (real_w / disp_w)
+        pixel_y = heat_click["y"] * (real_h / disp_h)
+        mpl_pixel_y = real_h - pixel_y
+        field_x, field_y = hax.transData.inverted().transform((pixel_x, mpl_pixel_y))
+        x_bins = np.linspace(0.0, FIELD_X, 7)
+        ix = np.searchsorted(x_bins, field_x, side="right") - 1
+        ix = max(0, min(5, ix))
+        x0, x1 = x_bins[ix], x_bins[ix + 1]
+        if field_y >= LANE_LEFT_MIN:
+            cname = "left"; y0, y1 = LANE_LEFT_MIN, FIELD_Y
+        elif field_y < LANE_RIGHT_MAX:
+            cname = "right"; y0, y1 = 0.0, LANE_RIGHT_MAX
+        else:
+            cname = "center"; y0, y1 = LANE_RIGHT_MAX, LANE_LEFT_MIN
+        st.session_state["heat_selection"] = {"ix": int(ix), "corridor": cname, "x0": float(x0), "x1": float(x1), "y0": float(y0), "y1": float(y1)}
+    plt.close(hfig)
+
+    # ---- Render Action Map placeholder: title + clear button ----
+    with pass_map_placeholder.container():
+        st.markdown('<h4 style="color:#ffffff; margin:0 0 6px 0;">Action Map</h4>', unsafe_allow_html=True)
+        if st.button("Limpar filtro do quadrante", key="clear_heat_filter"):
+            st.session_state["heat_selection"] = None
+
+        # apply heat selection filter on top of the main filter (if any)
+        df_to_draw = df_base
+        if st.session_state["heat_selection"] is not None:
+            sel = st.session_state["heat_selection"]
+            df_to_draw = df_base[
+                (df_base["x_end"] >= sel["x0"])
+                & (df_base["x_end"] < sel["x1"])
+                & (df_base["y_end"] >= sel["y0"])
+                & (df_base["y_end"] < sel["y1"])
+            ].reset_index(drop=True)
+
+        # Draw action map. For highlighting top N inside the drawn set we pass top_n
+        img_obj, ax, fig = draw_action_map(df_to_draw, title=f"Action Map — {selected_match}", top_n_highlight=int(top_n))
+        click = streamlit_image_coordinates(img_obj, width=DISPLAY_WIDTH)
+
+    selected_action = None
+    if click is not None:
+        real_w, real_h = img_obj.size
+        disp_w = click["width"]
+        disp_h = click["height"]
+        pixel_x = click["x"] * (real_w / disp_w)
+        pixel_y = click["y"] * (real_h / disp_h)
+        mpl_pixel_y = real_h - pixel_y
+        field_x, field_y = ax.transData.inverted().transform((pixel_x, mpl_pixel_y))
+        df_sel = df_to_draw.copy()
+        df_sel["dist"] = np.sqrt((df_sel["x_start"] - field_x) ** 2 + (df_sel["y_start"] - field_y) ** 2)
+        RADIUS = 5.0
+        candidates = df_sel[df_sel["dist"] < RADIUS].copy()
+        if not candidates.empty:
+            candidates = candidates.sort_values(by="dist", ascending=True)
+            selected_action = candidates.iloc[0]
+    plt.close(fig)
+
+    # display heat selection info
+    if st.session_state["heat_selection"] is not None:
+        sel = st.session_state["heat_selection"]
+        sel_mask = (
+            (df_base["x_end"] >= sel["x0"])
+            & (df_base["x_end"] < sel["x1"])
+            & (df_base["y_end"] >= sel["y0"])
+            & (df_base["y_end"] < sel["y1"])
+        )
+        sel_count = int(sel_mask.sum())
+        st.markdown(
+            f"<div style='color:#ffffff; margin-top:6px;'>"
+            f"<strong>Filtro aplicado:</strong> corredor <code>{sel['corridor']}</code>, coluna X #{sel['ix']+1} — {sel_count} ações</div>",
+            unsafe_allow_html=True,
+        )
+
+    # ---- Selected Action and data table ----
+    st.divider()
+    st.subheader("Selected Action")
+    if selected_action is None:
+        st.info("Click the start dot to inspect the action details.")
+    else:
+        st.success(f"Selected action: #{int(selected_action['number'])} ({selected_action['type']})")
+        det1, det2 = st.columns(2)
+        with det1:
+            st.write(f"**Start:** ({selected_action['x_start']:.2f}, {selected_action['y_start']:.2f})")
+        with det2:
+            st.write(f"**End:** ({selected_action['x_end']:.2f}, {selected_action['y_end']:.2f})")
+        dir_emoji = {"forward": "⬆️", "backward": "⬇️", "lateral": "↔️"}
+        direction_label = selected_action["direction"].capitalize()
+        emoji = dir_emoji.get(selected_action["direction"], "")
+        tag1, tag2, tag3 = st.columns(3)
+        tag1.write(f"**Direction:** {emoji} {direction_label}")
+        tag2.write(f"**Successful:** {'✅' if selected_action['is_won'] else '❌'}")
+        tag3.write("")
+        xt_col1, xt_col2, xt_col3, xt_col4 = st.columns(4)
+        xt_col1.metric("Distance", f"{selected_action['action_distance']:.1f}m")
+        xt_col2.metric("xT Start", f"{selected_action['xt_start']:.4f}")
+        xt_col3.metric("xT End", f"{selected_action['xt_end']:.4f}")
+        xt_col4.metric("ΔxT", f"{selected_action['delta_xt']:.4f}", delta=f"{selected_action['delta_xt']:.4f}" if selected_action["delta_xt"] != 0 else None)
+        if has_video_value(selected_action["video"]):
+            try:
+                st.video(selected_action["video"])
+            except Exception:
+                st.error(f"Video file not found: {selected_action['video']}")
+        else:
+            st.warning("No video is attached to this event.")
+
+    with st.expander("📊 Full Actions Data Table"):
+        display_cols = [
+            "number", "type", "outcome", "direction",
+            "x_start", "y_start", "x_end", "y_end",
+            "action_distance",
+            "is_forward", "is_backward", "is_lateral",
+            "xt_start", "xt_end", "delta_xt",
+        ]
+        st.dataframe(
+            df_to_draw[display_cols].style.format({
+                "x_start": "{:.2f}", "y_start": "{:.2f}",
+                "x_end": "{:.2f}", "y_end": "{:.2f}",
+                "action_distance": "{:.1f}",
+                "xt_start": "{:.4f}", "xt_end": "{:.4f}",
+                "delta_xt": "{:.4f}",
+            }),
+            use_container_width=True,
+            height=400,
+        )
+
+# RIGHT: Statistics (based on df_to_draw)
+with col_stats:
+    stats_safe = compute_stats(df_to_draw)
+    with st.expander("General Statistics", expanded=False):
+        st.markdown('<div class="stats-section-title">Overview</div>', unsafe_allow_html=True)
+        row1, row2, row3 = st.columns(3)
+        with row1:
+            small_metric("Total Actions", f"{stats_safe['total_actions']}")
+        with row2:
+            small_metric("Successful", f"{stats_safe['successful_actions']}")
+        with row3:
+            small_metric("Accuracy", f"{stats_safe['accuracy_pct']:.1f}%")
+        st.markdown("<hr style='margin:6px 0 8px 0;'>", unsafe_allow_html=True)
+        st.markdown('<div class="stats-section-title">Action Directions</div>', unsafe_allow_html=True)
+        dir1, dir2, dir3 = st.columns(3)
+        with dir1:
+            small_metric("⬆️ Forward", f"{stats_safe['forward_total']}")
+        with dir2:
+            small_metric("⬇️ Backward", f"{stats_safe['backward_total']}")
+        with dir3:
+            small_metric("↔️ Lateral", f"{stats_safe['lateral_total']}")
+    with st.expander("Advanced Statistics (xT)", expanded=True):
+        st.markdown('<div class="stats-section-title">Expected Threat (xT)</div>', unsafe_allow_html=True)
+        xt1, xt2, xt3 = st.columns(3)
+        with xt1:
+            small_metric("Σ ΔxT (positive)", f"{stats_safe['positive_xt_sum']:.4f}")
+        with xt2:
+            small_metric("Mean ΔxT (positive)", f"{stats_safe['positive_xt_mean']:.4f}")
+        with xt3:
+            small_metric("% Actions ΔxT > 0", f"{stats_safe['positive_xt_pct']:.1f}%")
+        st.markdown("<hr style='margin:6px 0 8px 0;'>", unsafe_allow_html=True)
+        st.markdown('<div class="stats-section-title">Top 5 ΔxT (positives)</div>', unsafe_allow_html=True)
+        if not stats_safe["top5_positive_table"].empty:
+            st.dataframe(
+                stats_safe["top5_positive_table"].style.format({
+                    "x_start": "{:.2f}", "y_start": "{:.2f}",
+                    "x_end": "{:.2f}", "y_end": "{:.2f}",
+                    "xt_start": "{:.4f}", "xt_end": "{:.4f}", "delta_xt": "{:.4f}",
+                }),
+                use_container_width=True,
+                height=240,
+            )
+        else:
+            st.write("No positive ΔxT actions to show.")
+        st.markdown("<hr style='margin:6px 0 8px 0;'>", unsafe_allow_html=True)
+        st.markdown('<div class="stats-section-title">Failed actions (xT contrários)</div>', unsafe_allow_html=True)
+        fx1, fx2, fx3 = st.columns(3)
+        with fx1:
+            small_metric("Failed actions", f"{stats_safe['failed_count']}")
+        with fx2:
+            small_metric("Σ xT (start) — failed", f"{stats_safe['failed_xt_lost_sum']:.4f}")
+        with fx3:
+            small_metric("Mean xT (start) — failed", f"{stats_safe['failed_xt_lost_mean']:.4f}")
+    st.divider()
+    st.caption("Notas: ΔxT é contabilizado apenas para ações bem-sucedidas; 'xT contrários' = soma/ média de xT do ponto inicial de ações falhadas (indica perda de posse em zonas perigosas).")
