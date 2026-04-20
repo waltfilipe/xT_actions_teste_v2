@@ -1,4 +1,5 @@
-# Action Map — Clean (Actions + xT) — v2 (updated to use smooth funnel transition xT measurement)
+# Action Map — Clean (Actions + xT) — v2
+# Updated with smooth funnel transition xT map
 import streamlit as st
 import matplotlib
 matplotlib.use("Agg")
@@ -306,7 +307,7 @@ def xt_value(x, y):
     return float(XT_GRID[iy, ix])
 
 # ==========================
-# DATA (user-provided actions)  — unchanged
+# DATA (user-provided actions)
 # ==========================
 matches_data = {
     "Ali vs Vancouver": [
