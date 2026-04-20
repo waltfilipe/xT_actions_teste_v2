@@ -1,6 +1,11 @@
-# Action Map — Clean (Actions + xT) — v4
-# xT: Options C + D + Base Angle Correction
-# New: Distance-Difficulty Bonus (log-scaled, capped, robust)
+# Action Map — Clean (Actions + xT) — v5
+# Changes:
+#   1. Distance bonus consolidated into single ΔxT adj metric (no separate filter)
+#   2. Actions: two dots + dashed line, color by xT_end (yellow → dark red)
+#   3. Top 10 (ΔxT adj + xT end) shown BEFORE the Action Map
+#   4. Removed bonus curve preview
+#   5. xT End prominent in selected action panel
+
 import streamlit as st
 import matplotlib
 matplotlib.use("Agg")
@@ -10,7 +15,6 @@ import pandas as pd
 import numpy as np
 from PIL import Image
 from io import BytesIO
-from matplotlib.lines import Line2D
 from matplotlib.patches import FancyArrowPatch, Rectangle
 from streamlit_image_coordinates import streamlit_image_coordinates
 from matplotlib.colors import Normalize, LinearSegmentedColormap
@@ -22,16 +26,15 @@ import math
 # ==========================
 st.set_page_config(layout="wide", page_title="Action Map — Clean (Actions + xT)")
 
-st.markdown(
-    """
+st.markdown("""
     <style>
     .small-metric { padding: 6px 8px; }
-    .small-metric .label  { font-size: 12px; color: #ffffff; margin-bottom: 3px; opacity: 0.95; }
-    .small-metric .value  { font-size: 18px; font-weight: 600; color: #ffffff; }
-    .small-metric .delta  { font-size: 11px; color: #e6e6e6; margin-top: 4px; }
-    .stats-section-title  { font-size: 14px; font-weight: 600; margin-bottom: 6px; color: #ffffff; }
+    .small-metric .label { font-size: 12px; color: #ffffff; margin-bottom: 3px; opacity: 0.95; }
+    .small-metric .value { font-size: 18px; font-weight: 600; color: #ffffff; }
+    .small-metric .delta { font-size: 11px; color: #e6e6e6; margin-top: 4px; }
+    .stats-section-title { font-size: 14px; font-weight: 600; margin-bottom: 6px; color: #ffffff; }
     .streamlit-expanderHeader { color: #ffffff !important; }
-    .streamlit-expander        { background: rgba(255,255,255,0.02); }
+    .streamlit-expander { background: rgba(255,255,255,0.02); }
     .filter-panel {
       background: linear-gradient(168deg, rgba(30,39,56,0.92) 0%, rgba(22,28,40,0.97) 100%);
       border: 1px solid rgba(255,255,255,0.08); border-radius: 14px;
@@ -42,10 +45,9 @@ st.markdown(
     .filter-panel h3 { font-size: 15px; color: #c8d6e5; letter-spacing: 0.5px; margin-bottom: 8px; }
     .filter-panel .filter-divider { border:none; border-top:1px solid rgba(255,255,255,0.07); margin:14px 0; }
     .stSubheader { color: #ffffff !important; }
+    .top10-table { font-size: 12px; }
     </style>
-    """,
-    unsafe_allow_html=True,
-)
+""", unsafe_allow_html=True)
 
 def small_metric(label: str, value: str, delta: str | None = None):
     html = f'<div class="small-metric"><div class="label">{label}</div><div class="value">{value}</div>'
@@ -67,10 +69,17 @@ LANE_RIGHT_MAX     = 26.67
 NX, NY             = 16, 12
 LATERAL_MIN_DIST   = 12.0
 
-COLOR_TOP   = "#2F80ED"
-COLOR_OTHER = "#bfc4ca"
-COLOR_FAIL  = "#FF6B6B"
-COLOR_ADJ   = "#F4A261"   # orange — highlight for top adjusted ΔxT
+# Action colormap: xT_end drives the color (pale yellow → dark red)
+CMAP_ACTION = LinearSegmentedColormap.from_list(
+    "xt_action",
+    ["#ffffcc", "#ffeda0", "#fed976", "#feb24c", "#fd8d3c", "#f03b20", "#bd0026", "#67000d"]
+)
+NORM_ACTION = Normalize(vmin=0.0, vmax=1.0)
+
+# Distance bonus defaults
+D_REF     = 10.0
+D_SCALE   = 20.0
+BONUS_CAP = 0.60
 
 START_DOT_SIZE = 28
 FIG_W, FIG_H   = 7.9, 5.3
@@ -79,41 +88,10 @@ FIG_DPI        = 110
 # ==========================
 # Distance-Difficulty Bonus
 # ==========================
-# D_REF    : below this distance (m), no bonus is awarded
-# D_SCALE  : log scaling factor — lower = steeper initial curve
-# BONUS_CAP: maximum bonus multiplier (0.60 = up to +60% on ΔxT)
-#
-# Curve shape (D_REF=10, D_SCALE=20, CAP=0.60):
-#   5 m  → 0.000  (shorter than ref, no bonus)
-#  15 m  → 0.182  (+18%)
-#  25 m  → 0.336  (+34%)
-#  40 m  → 0.470  (+47%)
-#  60 m+ → 0.600  (+60%, capped)
-D_REF     = 10.0
-D_SCALE   = 20.0
-BONUS_CAP = 0.60
-
-def distance_bonus(distance: float | np.ndarray) -> float | np.ndarray:
-    """
-    Log-scaled, capped distance-difficulty bonus multiplier.
-    Returns a value in [0, BONUS_CAP].
-    Statistically robust properties:
-      - Logarithmic: diminishing marginal returns (40→50m adds less than 10→20m)
-      - Capped: single outlier long action cannot dominate rankings
-      - Reference threshold: noise-level short actions get zero bonus
-    """
+def distance_bonus(distance):
     excess = np.maximum(0.0, np.asarray(distance, dtype=float) - D_REF)
-    raw    = np.log1p(excess / D_SCALE)          # log(1 + excess/scale)
-    return float(np.minimum(BONUS_CAP, raw)) if np.ndim(distance) == 0 else np.minimum(BONUS_CAP, raw)
-
-def adjusted_delta_xt(delta_xt: float | np.ndarray,
-                      distance:  float | np.ndarray) -> float | np.ndarray:
-    """
-    ΔxT_adj = ΔxT × (1 + distance_bonus)
-    Only applied to successful actions (ΔxT > 0).
-    """
-    bonus = distance_bonus(distance)
-    return np.asarray(delta_xt) * (1.0 + bonus)
+    raw    = np.log1p(excess / D_SCALE)
+    return np.minimum(BONUS_CAP, raw)
 
 # ==========================
 # xT Grid — Options C + D + Base Angle Correction
@@ -149,9 +127,6 @@ def compute_xt_grid(
     big_top_corner    = (x_big, center_y + penalty_width / 2.0)
     big_bottom_corner = (x_big, center_y - penalty_width / 2.0)
     funnel_vertices   = [left_goal_post, big_bottom_corner, big_top_corner, right_goal_post]
-    inside_flags      = Path(funnel_vertices).contains_points(
-        np.column_stack([Xc_hr.ravel(), Yc_hr.ravel()])
-    ).reshape(Xc_hr.shape)
 
     boundary_pts = []
     for i in range(len(funnel_vertices)):
@@ -169,7 +144,8 @@ def compute_xt_grid(
         np.minimum(min_d2, dx*dx + dy*dy, out=min_d2)
     abs_dist = np.sqrt(min_d2).reshape(Xc_hr.shape)
 
-    influence_curve = np.clip((1.0 - np.clip(abs_dist / FUNNEL_INFLUENCE_RANGE, 0, 1)) ** FUNNEL_POWER, 0, 1)
+    influence_curve = np.clip(
+        (1.0 - np.clip(abs_dist / FUNNEL_INFLUENCE_RANGE, 0, 1)) ** FUNNEL_POWER, 0, 1)
 
     D_hr       = np.hypot(FIELD_X - Xc_hr, center_y - Yc_hr)
     prox_hr    = 1.0 - np.clip(D_hr / np.hypot(FIELD_X, FIELD_Y / 2.0), 0, 1)
@@ -179,17 +155,15 @@ def compute_xt_grid(
          + central_w * np.clip(central_hr ** internal_central_power, 0, 1))
         * (1.0 + center_boost * prox_hr), 0, 1)
 
-    v1x = FIELD_X - Xc_hr; v1y = (center_y + goal_width/2.0) - Yc_hr
-    v2x = FIELD_X - Xc_hr; v2y = (center_y - goal_width/2.0) - Yc_hr
+    v1x = FIELD_X - Xc_hr; v1y = (center_y + goal_width / 2.0) - Yc_hr
+    v2x = FIELD_X - Xc_hr; v2y = (center_y - goal_width / 2.0) - Yc_hr
     cos_a        = np.clip((v1x*v2x + v1y*v2y) / (np.hypot(v1x,v1y)*np.hypot(v2x,v2y) + 1e-12), -1, 1)
     angle_factor = np.clip((np.arccos(cos_a) / (np.arccos(cos_a).max() + 1e-12)) ** ANGLE_POWER, 0, 1)
 
-    unit_bonus = np.clip(unit_bonus * ((1 - ANGLE_WEIGHT) + ANGLE_WEIGHT * angle_factor), 0, 1)
-
-    XT_BASE_c = XT_BASE_hr * ((1 - BASE_ANGLE_WEIGHT) + BASE_ANGLE_WEIGHT * angle_factor)
-    XT_BASE_c = (XT_BASE_c - XT_BASE_c.min()) / (XT_BASE_c.max() - XT_BASE_c.min() + 1e-12)
-
-    XT_BOOST = XT_BASE_c + influence_curve * BASE_BOOST_WEIGHT * unit_bonus
+    unit_bonus  = np.clip(unit_bonus * ((1 - ANGLE_WEIGHT) + ANGLE_WEIGHT * angle_factor), 0, 1)
+    XT_BASE_c   = XT_BASE_hr * ((1 - BASE_ANGLE_WEIGHT) + BASE_ANGLE_WEIGHT * angle_factor)
+    XT_BASE_c   = (XT_BASE_c - XT_BASE_c.min()) / (XT_BASE_c.max() - XT_BASE_c.min() + 1e-12)
+    XT_BOOST    = XT_BASE_c + influence_curve * BASE_BOOST_WEIGHT * unit_bonus
 
     px_w = FIELD_X / ncols_hr; px_h = FIELD_Y / nrows_hr
     rx   = max(1, int(round((blur_window_m / px_w) / 2.0)))
@@ -200,12 +174,11 @@ def compute_xt_grid(
         a    = np.pad(arr, ((ry,ry),(rx,rx)), mode="edge").astype(np.float64)
         ii   = a.cumsum(0).cumsum(1)
         s    = ii[2*ry:2*ry+H, 2*rx:2*rx+W].copy()
-        s   += ii[:H, :W]; s -= ii[:H, 2*rx:2*rx+W]; s -= ii[2*ry:2*ry+H, :W]
+        s   += ii[:H,:W]; s -= ii[:H,2*rx:2*rx+W]; s -= ii[2*ry:2*ry+H,:W]
         return s / ((2*ry+1)*(2*rx+1))
 
     w          = 0.5 * (1.0 - np.cos(np.pi * np.clip(abs_dist / band_width_m, 0, 1)))
     XT_BLENDED = w * XT_BOOST + (1 - w) * box_blur(XT_BOOST, rx, ry)
-
     rx_f = max(1, int(round((final_blur_m / px_w) / 2.0)))
     ry_f = max(1, int(round((final_blur_m / px_h) / 2.0)))
     XT   = 0.85 * XT_BLENDED + 0.15 * box_blur(XT_BLENDED, rx_f, ry_f)
@@ -216,9 +189,9 @@ def compute_xt_grid(
         for ix in range(NX):
             XT_coarse[iy, ix] = XT[iy*sub:(iy+1)*sub, ix*sub:(ix+1)*sub].mean()
     XT_coarse = (XT_coarse - XT_coarse.min()) / (XT_coarse.max() - XT_coarse.min() + 1e-12)
-    return XT_coarse, XT, inside_flags
+    return XT_coarse, XT
 
-XT_GRID, _, _ = compute_xt_grid()
+XT_GRID, _ = compute_xt_grid()
 
 def xt_value(x, y):
     ix = int(np.clip((x / FIELD_X) * NX, 0, NX - 1))
@@ -353,16 +326,27 @@ def classify_action_direction(x_start, y_start, x_end, y_end) -> str:
     dx, dy    = x_end - x_start, y_end - y_start
     dist      = np.sqrt(dx**2 + dy**2)
     angle_deg = np.degrees(np.arctan2(abs(dy), dx))
-    if angle_deg <= 45.0:   return "forward"
-    if angle_deg >= 135.0:  return "backward"
+    if angle_deg <= 45.0:  return "forward"
+    if angle_deg >= 135.0: return "backward"
     return "lateral" if dist > LATERAL_MIN_DIST else ("forward" if dx >= 0 else "backward")
+
+def recompute_bonus(df, d_ref=D_REF, d_scale=D_SCALE, bonus_cap=BONUS_CAP):
+    df = df.copy()
+    excess             = np.maximum(0.0, df["action_distance"].values - d_ref)
+    df["dist_bonus"]   = np.minimum(bonus_cap, np.log1p(excess / d_scale))
+    df["delta_xt_adj"] = np.where(
+        df["outcome"] == "successful",
+        df["delta_xt"] * (1.0 + df["dist_bonus"]),
+        0.0,
+    )
+    return df
 
 # ==========================
 # Build DataFrames
 # ==========================
 dfs_by_match = {}
 for match_name, events in matches_data.items():
-    dfm = pd.DataFrame(events, columns=["type", "x_start", "y_start", "x_end", "y_end", "video"])
+    dfm = pd.DataFrame(events, columns=["type","x_start","y_start","x_end","y_end","video"])
     dfm["match"]           = match_name
     dfm["number"]          = np.arange(1, len(dfm) + 1)
     dfm["is_won"]          = dfm["type"].str.contains("WON", case=False)
@@ -372,16 +356,11 @@ for match_name, events in matches_data.items():
     dfm["is_backward"]     = dfm["direction"] == "backward"
     dfm["is_lateral"]      = dfm["direction"] == "lateral"
     dfm["xt_start"]        = dfm.apply(lambda r: xt_value(r.x_start, r.y_start), axis=1)
-    dfm["xt_end"]          = dfm.apply(lambda r: xt_value(r.x_end,   r.y_end),   axis=1)
+    dfm["xt_end"]          = dfm.apply(lambda r: xt_value(r.x_end, r.y_end), axis=1)
     dfm["delta_xt"]        = np.where(dfm["outcome"] == "successful", dfm["xt_end"] - dfm["xt_start"], 0.0)
     dfm["action_distance"] = np.sqrt((dfm.x_end - dfm.x_start)**2 + (dfm.y_end - dfm.y_start)**2)
-    # Distance-Difficulty bonus
-    dfm["dist_bonus"]      = dfm["action_distance"].apply(distance_bonus)
-    dfm["delta_xt_adj"]    = np.where(
-        dfm["outcome"] == "successful",
-        dfm["delta_xt"] * (1.0 + dfm["dist_bonus"]),
-        0.0,
-    )
+    dfm["dist_bonus"]      = distance_bonus(dfm["action_distance"].values)
+    dfm["delta_xt_adj"]    = np.where(dfm["outcome"] == "successful", dfm["delta_xt"] * (1.0 + dfm["dist_bonus"]), 0.0)
     dfs_by_match[match_name] = dfm
 
 df_all    = pd.concat(dfs_by_match.values(), ignore_index=True)
@@ -396,161 +375,250 @@ def compute_stats(df: pd.DataFrame) -> dict:
     successful = int(df["is_won"].sum())
     accuracy   = (successful / total * 100.0) if total else 0.0
 
-    # Raw ΔxT stats
     pos_mask  = (df["outcome"] == "successful") & (df["delta_xt"] > 0)
     pos_count = int(pos_mask.sum())
     pos_sum   = float(df.loc[pos_mask, "delta_xt"].sum())  if pos_count else 0.0
     pos_mean  = float(df.loc[pos_mask, "delta_xt"].mean()) if pos_count else 0.0
     pos_pct   = (pos_count / total * 100.0) if total else 0.0
 
-    # Adjusted ΔxT stats
-    adj_mask   = (df["outcome"] == "successful") & (df["delta_xt_adj"] > 0)
-    adj_count  = int(adj_mask.sum())
-    adj_sum    = float(df.loc[adj_mask, "delta_xt_adj"].sum())  if adj_count else 0.0
-    adj_mean   = float(df.loc[adj_mask, "delta_xt_adj"].mean()) if adj_count else 0.0
-
-    # Top 5 by RAW ΔxT
-    top5_raw = pd.DataFrame()
-    if pos_count:
-        top5_raw = (
-            df.loc[pos_mask]
-            .sort_values("delta_xt", ascending=False)
-            .head(5)[["number", "type", "action_distance", "dist_bonus",
-                       "xt_start", "xt_end", "delta_xt", "delta_xt_adj"]]
-            .reset_index(drop=True)
-        )
-
-    # Top 5 by ADJUSTED ΔxT
-    top5_adj = pd.DataFrame()
-    if adj_count:
-        top5_adj = (
-            df.loc[adj_mask]
-            .sort_values("delta_xt_adj", ascending=False)
-            .head(5)[["number", "type", "action_distance", "dist_bonus",
-                       "xt_start", "xt_end", "delta_xt", "delta_xt_adj"]]
-            .reset_index(drop=True)
-        )
+    adj_mask  = (df["outcome"] == "successful") & (df["delta_xt_adj"] > 0)
+    adj_sum   = float(df.loc[adj_mask, "delta_xt_adj"].sum())  if adj_mask.any() else 0.0
+    adj_mean  = float(df.loc[adj_mask, "delta_xt_adj"].mean()) if adj_mask.any() else 0.0
 
     failed_mask  = df["outcome"] == "failed"
     failed_count = int(failed_mask.sum())
 
     return {
-        "total_actions":      total,
-        "successful_actions": successful,
-        "accuracy_pct":       round(accuracy, 2),
-        "forward_total":      int(df["is_forward"].sum()),
-        "backward_total":     int(df["is_backward"].sum()),
-        "lateral_total":      int(df["is_lateral"].sum()),
-        # raw
-        "positive_xt_count":  pos_count,
-        "positive_xt_sum":    round(pos_sum,  4),
-        "positive_xt_mean":   round(pos_mean, 4),
-        "positive_xt_pct":    round(pos_pct,  2),
-        "top5_raw":           top5_raw,
-        # adjusted
-        "adj_xt_sum":         round(adj_sum,  4),
-        "adj_xt_mean":        round(adj_mean, 4),
-        "top5_adj":           top5_adj,
-        # failed
+        "total_actions":       total,
+        "successful_actions":  successful,
+        "accuracy_pct":        round(accuracy, 2),
+        "forward_total":       int(df["is_forward"].sum()),
+        "backward_total":      int(df["is_backward"].sum()),
+        "lateral_total":       int(df["is_lateral"].sum()),
+        "positive_xt_count":   pos_count,
+        "positive_xt_sum":     round(pos_sum,  4),
+        "positive_xt_mean":    round(pos_mean, 4),
+        "positive_xt_pct":     round(pos_pct,  2),
+        "adj_xt_sum":          round(adj_sum,  4),
+        "adj_xt_mean":         round(adj_mean, 4),
         "failed_count":        failed_count,
         "failed_xt_lost_sum":  round(float(df.loc[failed_mask, "xt_start"].sum())  if failed_count else 0.0, 4),
         "failed_xt_lost_mean": round(float(df.loc[failed_mask, "xt_start"].mean()) if failed_count else 0.0, 4),
     }
 
 # ==========================
-# Draw functions
+# Draw: Action Map (dots + dashed lines, color by xT_end)
 # ==========================
-def draw_action_map(df: pd.DataFrame, title: str, top_n_highlight: int = 20,
-                    use_adj: bool = False):
-    pitch = Pitch(pitch_type="statsbomb", pitch_color="#1a1a2e", line_color="#ffffff", line_alpha=0.95)
+def draw_action_map(df: pd.DataFrame, title: str, top_n_highlight: int = 20):
+    pitch = Pitch(pitch_type="statsbomb", pitch_color="#1a1a2e",
+                  line_color="#ffffff", line_alpha=0.95)
     fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
     fig.set_facecolor("#1a1a2e"); fig.set_dpi(FIG_DPI)
     ax.axvline(x=FINAL_THIRD_LINE_X, color="#FFD54F", linewidth=1.0, alpha=0.20)
     ax.axvline(x=HALF_LINE_X,        color="#ffffff", linewidth=0.6, alpha=0.12, linestyle="--")
 
-    sort_col = "delta_xt_adj" if use_adj else "delta_xt"
+    # Determine top N by delta_xt_adj
     top_idxs = set()
     if not df.empty:
         df_s = df[df["outcome"] == "successful"]
         if not df_s.empty:
-            top_idxs = set(df_s.sort_values(sort_col, ascending=False).head(top_n_highlight).index)
+            top_idxs = set(df_s.sort_values("delta_xt_adj", ascending=False).head(top_n_highlight).index)
 
-    for idx, row in df.iterrows():
+    # Draw in two passes: non-top first, then top (so top renders on top)
+    def draw_row(row, idx):
+        color_rgba = CMAP_ACTION(NORM_ACTION(float(row["xt_end"])))
+
         if not row["is_won"]:
-            color, alpha = COLOR_FAIL, 0.88
+            # Failed: dotted line, low alpha, slightly muted color
+            lw, ls, alpha_line, s_start, s_end = 1.0, ":", 0.30, 18, 28
         elif idx in top_idxs:
-            color, alpha = (COLOR_ADJ if use_adj else COLOR_TOP), 0.95
+            # Top highlight: solid-ish dashed, full alpha, larger dots
+            lw, ls, alpha_line, s_start, s_end = 2.0, "--", 0.95, 28, 70
         else:
-            color, alpha = COLOR_OTHER, 0.20
+            # Other successful: dashed, medium alpha, smaller dots
+            lw, ls, alpha_line, s_start, s_end = 1.2, "--", 0.38, 16, 38
 
-        pitch.arrows(row.x_start, row.y_start, row.x_end, row.y_end,
-                     color=color, width=1.6, headwidth=2.5, headlength=2.5,
-                     ax=ax, zorder=3, alpha=alpha)
+        # Dashed line
+        ax.plot([row["x_start"], row["x_end"]],
+                [row["y_start"], row["y_end"]],
+                color=color_rgba, linestyle=ls, linewidth=lw,
+                alpha=alpha_line, zorder=3, solid_capstyle="round")
+
+        # Start dot (smaller)
+        pitch.scatter(row["x_start"], row["y_start"],
+                      s=s_start, marker="o",
+                      facecolors=color_rgba, edgecolors="white",
+                      linewidths=0.6, ax=ax, zorder=5, alpha=alpha_line)
+
+        # End dot (larger — indicates direction without arrow)
+        pitch.scatter(row["x_end"], row["y_end"],
+                      s=s_end, marker="o",
+                      facecolors=color_rgba, edgecolors="white",
+                      linewidths=0.8, ax=ax, zorder=6, alpha=alpha_line)
+
+        # Video marker on start dot
         if has_video_value(row["video"]):
-            pitch.scatter(row.x_start, row.y_start, s=68, marker="o", facecolors="none",
-                          edgecolors="#FFD54F", linewidths=2.0, ax=ax, zorder=5, alpha=alpha)
-        pitch.scatter(row.x_start, row.y_start, s=START_DOT_SIZE, marker="o",
-                      color=color, edgecolors="white", linewidths=0.7, ax=ax, zorder=6, alpha=alpha)
+            pitch.scatter(row["x_start"], row["y_start"],
+                          s=s_start + 40, marker="o", facecolors="none",
+                          edgecolors="#FFD54F", linewidths=1.8,
+                          ax=ax, zorder=7, alpha=alpha_line)
 
-    highlight_color = COLOR_ADJ if use_adj else COLOR_TOP
-    highlight_label = f"Top ΔxT adj (dist bonus)" if use_adj else "Top ΔxT (raw)"
-    legend_elements = [
-        Line2D([0],[0], color=highlight_color, lw=2.5, label=highlight_label),
-        Line2D([0],[0], color=COLOR_OTHER,     lw=2.5, label="Other successful"),
-        Line2D([0],[0], color=COLOR_FAIL,      lw=2.5, label="Failed"),
-    ]
-    legend = ax.legend(handles=legend_elements, loc="upper left", bbox_to_anchor=(0.01, 0.99),
-                       frameon=True, facecolor="#1a1a2e", edgecolor="#444466",
-                       fontsize="x-small", labelspacing=0.5, borderpad=0.5)
-    for txt in legend.get_texts(): txt.set_color("white")
-    legend.get_frame().set_alpha(0.92)
+    # Non-top first
+    for idx, row in df.iterrows():
+        if idx not in top_idxs:
+            draw_row(row, idx)
+    # Top on top
+    for idx, row in df.iterrows():
+        if idx in top_idxs:
+            draw_row(row, idx)
 
     ax.set_title(title, fontsize=12, color="#ffffff", pad=8)
-    fig.patches.append(FancyArrowPatch((0.45,0.05),(0.55,0.05), transform=fig.transFigure,
-                        arrowstyle="-|>", mutation_scale=15, linewidth=2, color="#cccccc"))
-    fig.text(0.5, 0.02, "Attack Direction", ha="center", va="center", fontsize=9, color="#cccccc")
+
+    # Compact colorbar for xT_end scale
+    sm   = plt.cm.ScalarMappable(cmap=CMAP_ACTION, norm=NORM_ACTION)
+    cbar = fig.colorbar(sm, ax=ax, fraction=0.025, pad=0.01, shrink=0.75)
+    cbar.set_label("xT end", color="#cccccc", fontsize=7, labelpad=4)
+    cbar.ax.yaxis.set_tick_params(color="#cccccc", labelsize=6)
+    plt.setp(plt.getp(cbar.ax.axes, "yticklabels"), color="#cccccc")
+
+    # Attack direction indicator
+    fig.patches.append(FancyArrowPatch(
+        (0.44, 0.04), (0.54, 0.04), transform=fig.transFigure,
+        arrowstyle="-|>", mutation_scale=13, linewidth=1.8, color="#cccccc"))
+    fig.text(0.49, 0.015, "Attack Direction",
+             ha="center", va="center", fontsize=8, color="#cccccc")
+
+    # Legend: line style legend (successful vs failed)
+    legend_items = [
+        ax.plot([], [], color="#fd8d3c", linestyle="--", lw=2.0,
+                label=f"Successful (top {top_n_highlight} larger)")[0],
+        ax.plot([], [], color="#fed976", linestyle="--", lw=1.2,
+                label="Successful (other)")[0],
+        ax.plot([], [], color="#aaaaaa", linestyle=":",  lw=1.0,
+                label="Failed")[0],
+    ]
+    legend = ax.legend(handles=legend_items, loc="upper left",
+                       bbox_to_anchor=(0.01, 0.99),
+                       frameon=True, facecolor="#1a1a2e", edgecolor="#444466",
+                       fontsize="xx-small", labelspacing=0.4, borderpad=0.5)
+    for txt in legend.get_texts(): txt.set_color("white")
+    legend.get_frame().set_alpha(0.90)
+
     fig.tight_layout(); fig.canvas.draw()
-    buf = BytesIO(); fig.savefig(buf, format="png", dpi=FIG_DPI, facecolor=fig.get_facecolor()); buf.seek(0)
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=FIG_DPI, facecolor=fig.get_facecolor())
+    buf.seek(0)
     return Image.open(buf), ax, fig
 
 
+# ==========================
+# Draw: Corridor Heatmap
+# ==========================
 def draw_corridor_heatmap(df: pd.DataFrame, title: str = "Zone Heatmap — Completed Actions"):
     df_s   = df[df["is_won"]].copy()
     x_bins = np.linspace(0.0, FIELD_X, 7)
-    corridors = {"left":(LANE_LEFT_MIN,FIELD_Y), "center":(LANE_RIGHT_MAX,LANE_LEFT_MIN), "right":(0.0,LANE_RIGHT_MAX)}
+    corridors = {
+        "left":   (LANE_LEFT_MIN, FIELD_Y),
+        "center": (LANE_RIGHT_MAX, LANE_LEFT_MIN),
+        "right":  (0.0, LANE_RIGHT_MAX),
+    }
     counts = {}
     for cname, (y0, y1) in corridors.items():
         arr = np.zeros(6, dtype=int)
         for i in range(6):
             x0, x1 = x_bins[i], x_bins[i+1]
-            arr[i]  = int(((df_s.x_end>=x0)&(df_s.x_end<x1)&(df_s.y_end>=y0)&(df_s.y_end<y1)).sum())
+            arr[i]  = int(((df_s.x_end>=x0)&(df_s.x_end<x1)&
+                           (df_s.y_end>=y0)&(df_s.y_end<y1)).sum())
         counts[cname] = arr
 
     vmax   = max(1, int(np.concatenate(list(counts.values())).max()))
-    pitch  = Pitch(pitch_type="statsbomb", pitch_color="#1a1a2e", line_color="#ffffff", line_alpha=0.95)
+    pitch  = Pitch(pitch_type="statsbomb", pitch_color="#1a1a2e",
+                   line_color="#ffffff", line_alpha=0.95)
     fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
     fig.set_facecolor("#1a1a2e"); fig.set_dpi(FIG_DPI)
-    cmap_h = LinearSegmentedColormap.from_list("wr", ["#ffffff","#ffecec","#ffbfbf","#ff8080","#ff3b3b","#ff0000"])
-    norm_h = Normalize(vmin=0, vmax=vmax); thr = max(1, vmax*0.35)
 
-    for cname, (y0,y1) in corridors.items():
+    cmap_h = LinearSegmentedColormap.from_list(
+        "wr", ["#ffffff","#ffecec","#ffbfbf","#ff8080","#ff3b3b","#ff0000"])
+    norm_h = Normalize(vmin=0, vmax=vmax)
+    thr    = max(1, vmax * 0.35)
+
+    for cname, (y0, y1) in corridors.items():
         for i, val in enumerate(counts[cname]):
             x0, x1 = x_bins[i], x_bins[i+1]
-            ax.add_patch(Rectangle((x0,y0),x1-x0,y1-y0, facecolor=cmap_h(norm_h(val)),
-                                    edgecolor=(1,1,1,0.12), linewidth=0.6, alpha=0.95, zorder=2))
-            ax.text((x0+x1)/2,(y0+y1)/2,str(val),ha="center",va="center",zorder=4,fontsize=11,
-                    color="#000000" if val<=thr else "#ffffff",
-                    fontweight="700" if val>=vmax*0.5 else "600")
+            ax.add_patch(Rectangle((x0,y0), x1-x0, y1-y0,
+                                   facecolor=cmap_h(norm_h(val)),
+                                   edgecolor=(1,1,1,0.12),
+                                   linewidth=0.6, alpha=0.95, zorder=2))
+            ax.text((x0+x1)/2, (y0+y1)/2, str(val),
+                    ha="center", va="center", zorder=4, fontsize=11,
+                    color="#000000" if val <= thr else "#ffffff",
+                    fontweight="700" if val >= vmax*0.5 else "600")
 
     ax.set_title(title, fontsize=12, color="#ffffff", pad=8)
     ax.axhline(y=LANE_LEFT_MIN,  color="#ffffff", lw=0.5, alpha=0.15, linestyle="--", zorder=3)
     ax.axhline(y=LANE_RIGHT_MAX, color="#ffffff", lw=0.5, alpha=0.15, linestyle="--", zorder=3)
-    fig.patches.append(FancyArrowPatch((0.45,0.05),(0.55,0.05), transform=fig.transFigure,
-                        arrowstyle="-|>", mutation_scale=15, linewidth=2, color="#cccccc"))
-    fig.text(0.5,0.02,"Attack Direction",ha="center",va="center",fontsize=9,color="#cccccc")
+    fig.patches.append(FancyArrowPatch(
+        (0.44, 0.04), (0.54, 0.04), transform=fig.transFigure,
+        arrowstyle="-|>", mutation_scale=13, linewidth=1.8, color="#cccccc"))
+    fig.text(0.49, 0.015, "Attack Direction",
+             ha="center", va="center", fontsize=8, color="#cccccc")
     fig.tight_layout(); fig.canvas.draw()
-    buf = BytesIO(); fig.savefig(buf, format="png", dpi=FIG_DPI, facecolor=fig.get_facecolor()); buf.seek(0)
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=FIG_DPI, facecolor=fig.get_facecolor())
+    buf.seek(0)
     return Image.open(buf), ax, fig
+
+
+# ==========================
+# Top 10 mini-table renderer
+# ==========================
+def render_top10(df: pd.DataFrame):
+    """Compact Top 10 table: rank | #action | ΔxT adj | xT end"""
+    df_s = df[(df["outcome"] == "successful") & (df["delta_xt_adj"] > 0)]
+    if df_s.empty:
+        st.caption("No successful actions with positive ΔxT.")
+        return
+    top = (df_s.sort_values("delta_xt_adj", ascending=False)
+              .head(10)
+              .reset_index(drop=True))
+
+    rows_html = ""
+    for i, row in top.iterrows():
+        rank  = i + 1
+        color = matplotlib.colors.to_hex(CMAP_ACTION(NORM_ACTION(float(row["xt_end"]))))
+        dot   = (f'<span style="display:inline-block;width:10px;height:10px;'
+                 f'border-radius:50%;background:{color};'
+                 f'vertical-align:middle;margin-right:4px;"></span>')
+        rows_html += (
+            f"<tr>"
+            f"<td style='color:#aaa;text-align:center;padding:3px 6px;'>#{rank}</td>"
+            f"<td style='color:#fff;text-align:center;padding:3px 6px;'>{int(row['number'])}</td>"
+            f"<td style='color:#fff;text-align:right;padding:3px 6px;font-weight:600;'>"
+            f"  {row['delta_xt_adj']:.4f}</td>"
+            f"<td style='text-align:center;padding:3px 6px;'>{dot}"
+            f"  <span style='color:#fff'>{row['xt_end']:.4f}</span></td>"
+            f"<td style='color:#ccc;text-align:center;padding:3px 6px;font-size:11px;'>"
+            f"  ({row['x_start']:.0f},{row['y_start']:.0f})→({row['x_end']:.0f},{row['y_end']:.0f})</td>"
+            f"</tr>"
+        )
+    table_html = f"""
+    <table style='width:100%;border-collapse:collapse;
+                  background:rgba(255,255,255,0.03);border-radius:8px;
+                  font-size:12px;margin-bottom:8px;'>
+      <thead>
+        <tr style='border-bottom:1px solid rgba(255,255,255,0.12);'>
+          <th style='color:#aaa;padding:4px 6px;text-align:center;font-weight:500;'>Rank</th>
+          <th style='color:#aaa;padding:4px 6px;text-align:center;font-weight:500;'>#</th>
+          <th style='color:#aaa;padding:4px 6px;text-align:right; font-weight:500;'>ΔxT adj</th>
+          <th style='color:#aaa;padding:4px 6px;text-align:center;font-weight:500;'>xT End</th>
+          <th style='color:#aaa;padding:4px 6px;text-align:center;font-weight:500;'>Start → End</th>
+        </tr>
+      </thead>
+      <tbody>{rows_html}</tbody>
+    </table>
+    """
+    st.markdown(table_html, unsafe_allow_html=True)
+
 
 # ==========================
 # Layout
@@ -565,66 +633,62 @@ with col_filters:
     st.markdown("### 🎯 Action Filter")
     action_filter = st.radio(
         "Filter actions to display",
-        ["All Actions","Top N actions (ΔxT)","Top N actions (ΔxT adj)",
-         "Unsuccessful actions","Successful actions",
-         "Positive xT only (successful)","High xT only (successful)"],
+        ["All Actions", "Top N actions (ΔxT)",
+         "Unsuccessful actions", "Successful actions",
+         "Positive xT only (successful)", "High xT only (successful)"],
         index=0,
     )
-    st.markdown("<div style='margin-top:8px; color:#e6e6e6;'>Top N / High xT controls</div>", unsafe_allow_html=True)
+    st.markdown("<div style='margin-top:8px;color:#e6e6e6;'>Top N / High xT controls</div>",
+                unsafe_allow_html=True)
     top_n        = st.number_input("Top N", min_value=1, max_value=100, value=20, step=1)
-    xt_threshold = st.slider("High xT threshold (ΔxT) ≥", min_value=0.0, max_value=0.5, value=0.03, step=0.005)
+    xt_threshold = st.slider("High xT threshold (ΔxT) ≥",
+                             min_value=0.0, max_value=0.5, value=0.03, step=0.005)
     st.markdown('<hr class="filter-divider">', unsafe_allow_html=True)
-    st.markdown("### 📐 Distance Bonus Parameters")
-    d_ref_ui     = st.slider("D_REF — min distance for bonus (m)",  5.0, 30.0, float(D_REF),   0.5)
-    d_scale_ui   = st.slider("D_SCALE — log scaling factor",        5.0, 50.0, float(D_SCALE),  1.0)
-    bonus_cap_ui = st.slider("BONUS_CAP — max bonus multiplier",    0.1,  1.0, float(BONUS_CAP), 0.05)
+    st.markdown("### 📐 Distance Bonus")
+    d_ref_ui     = st.slider("D_REF — min distance (m)",    5.0, 30.0, float(D_REF),     0.5)
+    d_scale_ui   = st.slider("D_SCALE — log scale factor",  5.0, 50.0, float(D_SCALE),   1.0)
+    bonus_cap_ui = st.slider("BONUS_CAP — max multiplier",  0.1,  1.0, float(BONUS_CAP), 0.05)
     st.markdown('</div>', unsafe_allow_html=True)
 
-for key, default in [("heat_selection", None), ("last_match", selected_match), ("last_filter", action_filter)]:
+# Session state
+for key, default in [("heat_selection", None),
+                     ("last_match", selected_match),
+                     ("last_filter", action_filter)]:
     if key not in st.session_state:
         st.session_state[key] = default
+
 if st.session_state["last_match"] != selected_match:
-    st.session_state["heat_selection"] = None; st.session_state["last_match"] = selected_match
+    st.session_state["heat_selection"] = None
+    st.session_state["last_match"]     = selected_match
 if st.session_state["last_filter"] != action_filter:
-    st.session_state["heat_selection"] = None; st.session_state["last_filter"] = action_filter
-
-# Recompute bonus columns with UI parameters
-def recompute_bonus(df, d_ref, d_scale, bonus_cap):
-    excess = np.maximum(0.0, df["action_distance"].values - d_ref)
-    raw    = np.log1p(excess / d_scale)
-    df = df.copy()
-    df["dist_bonus"]   = np.minimum(bonus_cap, raw)
-    df["delta_xt_adj"] = np.where(
-        df["outcome"] == "successful",
-        df["delta_xt"] * (1.0 + df["dist_bonus"]),
-        0.0,
-    )
-    return df
-
-use_adj_highlight = action_filter == "Top N actions (ΔxT adj)"
+    st.session_state["heat_selection"] = None
+    st.session_state["last_filter"]    = action_filter
 
 with col_field:
-    df_base = recompute_bonus(full_data[selected_match].copy(), d_ref_ui, d_scale_ui, bonus_cap_ui)
+    # Apply filter
+    df_base = recompute_bonus(full_data[selected_match].copy(),
+                              d_ref_ui, d_scale_ui, bonus_cap_ui)
 
     if action_filter == "All Actions":
         df_base = df_base.reset_index(drop=True)
-    elif action_filter in ("Top N actions (ΔxT)", "Top N actions (ΔxT adj)"):
-        sort_col = "delta_xt_adj" if use_adj_highlight else "delta_xt"
-        df_s     = df_base[df_base["outcome"] == "successful"]
-        df_base  = df_s.sort_values(sort_col, ascending=False).head(int(top_n)).reset_index(drop=True)
+    elif action_filter == "Top N actions (ΔxT)":
+        df_s    = df_base[df_base["outcome"] == "successful"]
+        df_base = df_s.sort_values("delta_xt_adj", ascending=False).head(int(top_n)).reset_index(drop=True)
     elif action_filter == "Unsuccessful actions":
         df_base = df_base[df_base["outcome"] == "failed"].reset_index(drop=True)
     elif action_filter == "Successful actions":
         df_base = df_base[df_base["outcome"] == "successful"].reset_index(drop=True)
     elif action_filter == "Positive xT only (successful)":
-        df_base = df_base[(df_base["outcome"]=="successful") & (df_base["delta_xt"]>0)].reset_index(drop=True)
+        df_base = df_base[(df_base["outcome"] == "successful") & (df_base["delta_xt"] > 0)].reset_index(drop=True)
     elif action_filter == "High xT only (successful)":
-        df_base = df_base[(df_base["outcome"]=="successful") & (df_base["delta_xt"]>=float(xt_threshold))].reset_index(drop=True)
+        df_base = df_base[(df_base["outcome"] == "successful") & (df_base["delta_xt"] >= float(xt_threshold))].reset_index(drop=True)
 
     DISPLAY_WIDTH        = 780
     pass_map_placeholder = st.empty()
 
-    st.markdown('<h4 style="color:#ffffff; margin:6px 0 6px 0;">Zone Heatmap</h4>', unsafe_allow_html=True)
+    # Zone Heatmap
+    st.markdown('<h4 style="color:#ffffff;margin:6px 0 6px 0;">Zone Heatmap</h4>',
+                unsafe_allow_html=True)
     heat_img, hax, hfig = draw_corridor_heatmap(df_base)
     heat_click = streamlit_image_coordinates(heat_img, width=DISPLAY_WIDTH)
 
@@ -636,31 +700,47 @@ with col_field:
         x_bins   = np.linspace(0.0, FIELD_X, 7)
         ix       = max(0, min(5, np.searchsorted(x_bins, field_x, side="right") - 1))
         x0, x1   = x_bins[ix], x_bins[ix+1]
-        if   field_y >= LANE_LEFT_MIN:  cname,y0,y1 = "left",   LANE_LEFT_MIN,  FIELD_Y
-        elif field_y <  LANE_RIGHT_MAX: cname,y0,y1 = "right",  0.0,            LANE_RIGHT_MAX
-        else:                           cname,y0,y1 = "center", LANE_RIGHT_MAX, LANE_LEFT_MIN
-        st.session_state["heat_selection"] = {"ix":int(ix),"corridor":cname,
-            "x0":float(x0),"x1":float(x1),"y0":float(y0),"y1":float(y1)}
+        if   field_y >= LANE_LEFT_MIN:  cname, y0, y1 = "left",   LANE_LEFT_MIN,  FIELD_Y
+        elif field_y <  LANE_RIGHT_MAX: cname, y0, y1 = "right",  0.0,            LANE_RIGHT_MAX
+        else:                           cname, y0, y1 = "center", LANE_RIGHT_MAX, LANE_LEFT_MIN
+        st.session_state["heat_selection"] = {
+            "ix": int(ix), "corridor": cname,
+            "x0": float(x0), "x1": float(x1), "y0": float(y0), "y1": float(y1),
+        }
     plt.close(hfig)
 
+    # Action Map + Top 10 inside placeholder
     with pass_map_placeholder.container():
-        st.markdown('<h4 style="color:#ffffff; margin:0 0 6px 0;">Action Map</h4>', unsafe_allow_html=True)
+
+        # --- Apply heatmap zone filter ---
+        df_to_draw = df_base
+        if st.session_state["heat_selection"] is not None:
+            sel        = st.session_state["heat_selection"]
+            df_to_draw = df_base[
+                (df_base.x_end >= sel["x0"]) & (df_base.x_end < sel["x1"]) &
+                (df_base.y_end >= sel["y0"]) & (df_base.y_end < sel["y1"])
+            ].reset_index(drop=True)
+
+        # --- TOP 10 (before action map) ---
+        st.markdown(
+            '<h4 style="color:#ffffff;margin:0 0 4px 0;">🏆 Top 10 Actions — ΔxT adj + xT End</h4>',
+            unsafe_allow_html=True)
+        render_top10(df_to_draw)
+
+        # --- Action Map ---
+        st.markdown('<h4 style="color:#ffffff;margin:4px 0 4px 0;">Action Map</h4>',
+                    unsafe_allow_html=True)
         if st.button("Limpar filtro do quadrante", key="clear_heat_filter"):
             st.session_state["heat_selection"] = None
 
-        df_to_draw = df_base
-        if st.session_state["heat_selection"] is not None:
-            sel = st.session_state["heat_selection"]
-            df_to_draw = df_base[
-                (df_base.x_end>=sel["x0"])&(df_base.x_end<sel["x1"])&
-                (df_base.y_end>=sel["y0"])&(df_base.y_end<sel["y1"])
-            ].reset_index(drop=True)
-
         img_obj, ax, fig = draw_action_map(
-            df_to_draw, title=f"Action Map — {selected_match}",
-            top_n_highlight=int(top_n), use_adj=use_adj_highlight)
+            df_to_draw,
+            title=f"Action Map — {selected_match}",
+            top_n_highlight=int(top_n),
+        )
         click = streamlit_image_coordinates(img_obj, width=DISPLAY_WIDTH)
 
+    # Click to select action
     selected_action = None
     if click is not None:
         real_w, real_h   = img_obj.size
@@ -668,45 +748,61 @@ with col_field:
         pixel_y  = click["y"] * (real_h / click["height"])
         field_x, field_y = ax.transData.inverted().transform((pixel_x, real_h - pixel_y))
         df_sel   = df_to_draw.copy()
-        df_sel["dist"] = np.sqrt((df_sel.x_start-field_x)**2 + (df_sel.y_start-field_y)**2)
+        df_sel["dist"] = np.sqrt((df_sel.x_start - field_x)**2 + (df_sel.y_start - field_y)**2)
         cands    = df_sel[df_sel["dist"] < 5.0]
         if not cands.empty:
             selected_action = cands.sort_values("dist").iloc[0]
     plt.close(fig)
 
+    # Heatmap filter info
     if st.session_state["heat_selection"] is not None:
         sel      = st.session_state["heat_selection"]
-        sel_mask = ((df_base.x_end>=sel["x0"])&(df_base.x_end<sel["x1"])&
-                    (df_base.y_end>=sel["y0"])&(df_base.y_end<sel["y1"]))
+        sel_mask = ((df_base.x_end >= sel["x0"]) & (df_base.x_end < sel["x1"]) &
+                    (df_base.y_end >= sel["y0"]) & (df_base.y_end < sel["y1"]))
         st.markdown(
-            f"<div style='color:#ffffff;margin-top:6px;'><strong>Filtro:</strong> "
-            f"corredor <code>{sel['corridor']}</code>, col X #{sel['ix']+1} — {int(sel_mask.sum())} ações</div>",
+            f"<div style='color:#ffffff;margin-top:4px;'>"
+            f"<strong>Filtro:</strong> corredor <code>{sel['corridor']}</code>, "
+            f"col X #{sel['ix']+1} — {int(sel_mask.sum())} ações</div>",
             unsafe_allow_html=True)
 
+    # --- Selected Action Details ---
     st.divider()
     st.subheader("Selected Action")
     if selected_action is None:
-        st.info("Click the start dot to inspect the action details.")
+        st.info("Click a start dot on the map to inspect the action.")
     else:
-        st.success(f"Selected action: #{int(selected_action['number'])} ({selected_action['type']})")
+        # Color swatch for this action's xT_end
+        act_color = matplotlib.colors.to_hex(
+            CMAP_ACTION(NORM_ACTION(float(selected_action["xt_end"]))))
+        st.markdown(
+            f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">'
+            f'<span style="display:inline-block;width:14px;height:14px;border-radius:50%;'
+            f'background:{act_color};border:1px solid #fff;"></span>'
+            f'<strong style="color:#fff;">Action #{int(selected_action["number"])} '
+            f'— {selected_action["type"]}</strong></div>',
+            unsafe_allow_html=True)
+
         c1, c2 = st.columns(2)
         c1.write(f"**Start:** ({selected_action.x_start:.2f}, {selected_action.y_start:.2f})")
         c2.write(f"**End:**   ({selected_action.x_end:.2f},   {selected_action.y_end:.2f})")
 
-        dir_emoji = {"forward":"⬆️","backward":"⬇️","lateral":"↔️"}
-        t1,t2,t3 = st.columns(3)
-        t1.write(f"**Direction:** {dir_emoji.get(selected_action['direction'],'')} {selected_action['direction'].capitalize()}")
+        dir_emoji = {"forward": "⬆️", "backward": "⬇️", "lateral": "↔️"}
+        t1, t2, t3 = st.columns(3)
+        t1.write(f"**Direction:** {dir_emoji.get(selected_action['direction'],'')} "
+                 f"{selected_action['direction'].capitalize()}")
         t2.write(f"**Successful:** {'✅' if selected_action['is_won'] else '❌'}")
         t3.write("")
 
-        x1,x2,x3,x4,x5,x6 = st.columns(6)
-        x1.metric("Distance",   f"{selected_action['action_distance']:.1f}m")
-        x2.metric("xT Start",   f"{selected_action['xt_start']:.4f}")
-        x3.metric("xT End",     f"{selected_action['xt_end']:.4f}")
-        x4.metric("ΔxT",        f"{selected_action['delta_xt']:.4f}")
-        x5.metric("Dist Bonus", f"+{selected_action['dist_bonus']*100:.1f}%")
-        x6.metric("ΔxT adj",    f"{selected_action['delta_xt_adj']:.4f}",
-                  delta=f"{selected_action['delta_xt_adj']:.4f}" if selected_action["delta_xt_adj"] != 0 else None)
+        # Metrics row — xT End prominent
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
+        m1.metric("Distance",   f"{selected_action['action_distance']:.1f}m")
+        m2.metric("xT Start",   f"{selected_action['xt_start']:.4f}")
+        m3.metric("xT End",     f"{selected_action['xt_end']:.4f}")
+        m4.metric("ΔxT",        f"{selected_action['delta_xt']:.4f}")
+        m5.metric("Dist Bonus", f"+{selected_action['dist_bonus']*100:.1f}%")
+        m6.metric("ΔxT adj",    f"{selected_action['delta_xt_adj']:.4f}",
+                  delta=f"{selected_action['delta_xt_adj']:.4f}"
+                  if selected_action["delta_xt_adj"] != 0 else None)
 
         if has_video_value(selected_action["video"]):
             try: st.video(selected_action["video"])
@@ -715,97 +811,64 @@ with col_field:
             st.warning("No video is attached to this event.")
 
     with st.expander("📊 Full Actions Data Table"):
-        display_cols = ["number","type","outcome","direction",
-                        "x_start","y_start","x_end","y_end","action_distance",
-                        "xt_start","xt_end","delta_xt","dist_bonus","delta_xt_adj"]
+        display_cols = [
+            "number", "type", "outcome", "direction",
+            "x_start", "y_start", "x_end", "y_end", "action_distance",
+            "xt_start", "xt_end", "delta_xt", "dist_bonus", "delta_xt_adj",
+        ]
         st.dataframe(
             df_to_draw[display_cols].style.format({
-                "x_start":"{:.2f}","y_start":"{:.2f}","x_end":"{:.2f}","y_end":"{:.2f}",
-                "action_distance":"{:.1f}","xt_start":"{:.4f}","xt_end":"{:.4f}",
-                "delta_xt":"{:.4f}","dist_bonus":"{:.3f}","delta_xt_adj":"{:.4f}",
+                "x_start": "{:.2f}", "y_start": "{:.2f}",
+                "x_end":   "{:.2f}", "y_end":   "{:.2f}",
+                "action_distance": "{:.1f}",
+                "xt_start": "{:.4f}", "xt_end": "{:.4f}",
+                "delta_xt": "{:.4f}", "dist_bonus": "{:.3f}",
+                "delta_xt_adj": "{:.4f}",
             }),
             use_container_width=True, height=400,
         )
 
+# ==========================
+# Stats Panel
+# ==========================
 with col_stats:
     stats_safe = compute_stats(df_to_draw)
 
     with st.expander("General Statistics", expanded=False):
         st.markdown('<div class="stats-section-title">Overview</div>', unsafe_allow_html=True)
-        r1,r2,r3 = st.columns(3)
+        r1, r2, r3 = st.columns(3)
         with r1: small_metric("Total Actions", f"{stats_safe['total_actions']}")
         with r2: small_metric("Successful",    f"{stats_safe['successful_actions']}")
         with r3: small_metric("Accuracy",      f"{stats_safe['accuracy_pct']:.1f}%")
         st.markdown("<hr style='margin:6px 0 8px 0;'>", unsafe_allow_html=True)
         st.markdown('<div class="stats-section-title">Action Directions</div>', unsafe_allow_html=True)
-        d1,d2,d3 = st.columns(3)
+        d1, d2, d3 = st.columns(3)
         with d1: small_metric("⬆️ Forward",  f"{stats_safe['forward_total']}")
         with d2: small_metric("⬇️ Backward", f"{stats_safe['backward_total']}")
         with d3: small_metric("↔️ Lateral",  f"{stats_safe['lateral_total']}")
 
-    with st.expander("Raw ΔxT Statistics", expanded=False):
-        st.markdown('<div class="stats-section-title">Expected Threat — Raw ΔxT</div>', unsafe_allow_html=True)
-        xt1,xt2,xt3 = st.columns(3)
+    with st.expander("Advanced Statistics (xT)", expanded=True):
+        st.markdown('<div class="stats-section-title">Raw ΔxT</div>', unsafe_allow_html=True)
+        xt1, xt2, xt3 = st.columns(3)
         with xt1: small_metric("Σ ΔxT",          f"{stats_safe['positive_xt_sum']:.4f}")
         with xt2: small_metric("Mean ΔxT",        f"{stats_safe['positive_xt_mean']:.4f}")
         with xt3: small_metric("% Actions ΔxT>0", f"{stats_safe['positive_xt_pct']:.1f}%")
         st.markdown("<hr style='margin:6px 0 8px 0;'>", unsafe_allow_html=True)
-        st.markdown('<div class="stats-section-title">Top 5 — Raw ΔxT</div>', unsafe_allow_html=True)
-        if not stats_safe["top5_raw"].empty:
-            st.dataframe(stats_safe["top5_raw"].style.format({
-                "action_distance":"{:.1f}","dist_bonus":"{:.3f}",
-                "xt_start":"{:.4f}","xt_end":"{:.4f}",
-                "delta_xt":"{:.4f}","delta_xt_adj":"{:.4f}",
-            }), use_container_width=True, height=220)
-        else:
-            st.write("No positive ΔxT actions.")
+        st.markdown('<div class="stats-section-title">ΔxT adj (distance-weighted)</div>',
+                    unsafe_allow_html=True)
+        a1, a2 = st.columns(2)
+        with a1: small_metric("Σ ΔxT adj",   f"{stats_safe['adj_xt_sum']:.4f}")
+        with a2: small_metric("Mean ΔxT adj", f"{stats_safe['adj_xt_mean']:.4f}")
 
-    with st.expander("📐 Adjusted ΔxT Statistics (Distance Bonus)", expanded=True):
-        st.markdown('<div class="stats-section-title">Expected Threat — ΔxT adj (distance-weighted)</div>', unsafe_allow_html=True)
-        ax1,ax2 = st.columns(2)
-        with ax1: small_metric("Σ ΔxT adj",   f"{stats_safe['adj_xt_sum']:.4f}")
-        with ax2: small_metric("Mean ΔxT adj", f"{stats_safe['adj_xt_mean']:.4f}")
-
-        # Bonus curve preview
-        st.markdown("<hr style='margin:6px 0 8px 0;'>", unsafe_allow_html=True)
-        st.markdown('<div class="stats-section-title">Bonus curve preview</div>', unsafe_allow_html=True)
-        d_range = np.linspace(0, 70, 200)
-        excess  = np.maximum(0.0, d_range - d_ref_ui)
-        b_curve = np.minimum(bonus_cap_ui, np.log1p(excess / d_scale_ui))
-        fig_c, ax_c = plt.subplots(figsize=(3.2, 1.8))
-        fig_c.patch.set_facecolor("#1a1a2e"); ax_c.set_facecolor("#1a1a2e")
-        ax_c.plot(d_range, b_curve * 100, color=COLOR_ADJ, lw=2)
-        ax_c.axvline(x=d_ref_ui, color="#ffffff", lw=0.7, linestyle="--", alpha=0.4)
-        ax_c.set_xlabel("Distance (m)", color="#cccccc", fontsize=8)
-        ax_c.set_ylabel("Bonus (%)",    color="#cccccc", fontsize=8)
-        ax_c.tick_params(colors="#cccccc", labelsize=7)
-        for spine in ax_c.spines.values(): spine.set_edgecolor("#444466")
-        fig_c.tight_layout()
-        buf_c = BytesIO(); fig_c.savefig(buf_c, format="png", dpi=90, facecolor="#1a1a2e"); buf_c.seek(0)
-        st.image(buf_c, use_container_width=True)
-        plt.close(fig_c)
-
-        st.markdown("<hr style='margin:6px 0 8px 0;'>", unsafe_allow_html=True)
-        st.markdown('<div class="stats-section-title">Top 5 — ΔxT adj</div>', unsafe_allow_html=True)
-        if not stats_safe["top5_adj"].empty:
-            st.dataframe(stats_safe["top5_adj"].style.format({
-                "action_distance":"{:.1f}","dist_bonus":"{:.3f}",
-                "xt_start":"{:.4f}","xt_end":"{:.4f}",
-                "delta_xt":"{:.4f}","delta_xt_adj":"{:.4f}",
-            }), use_container_width=True, height=220)
-        else:
-            st.write("No adjusted ΔxT actions.")
-
-    with st.expander("Failed actions", expanded=False):
+    with st.expander("Failed Actions", expanded=False):
         st.markdown('<div class="stats-section-title">xT contrários</div>', unsafe_allow_html=True)
-        fx1,fx2,fx3 = st.columns(3)
+        fx1, fx2, fx3 = st.columns(3)
         with fx1: small_metric("Failed",              f"{stats_safe['failed_count']}")
         with fx2: small_metric("Σ xT start — failed", f"{stats_safe['failed_xt_lost_sum']:.4f}")
         with fx3: small_metric("Mean xT — failed",    f"{stats_safe['failed_xt_lost_mean']:.4f}")
 
     st.divider()
     st.caption(
-        "ΔxT adj = ΔxT × (1 + bônus de distância). "
-        "Bônus = min(CAP, log(1 + max(0, d−D_REF) / D_SCALE)). "
-        "Ajuste D_REF, D_SCALE e BONUS_CAP no painel esquerdo."
+        "Cor das ações = xT End (amarelo claro → vermelho escuro). "
+        "Dot maior = destino. ΔxT adj = ΔxT × (1 + bônus de distância log-escalado)."
     )
