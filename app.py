@@ -1,4 +1,4 @@
-# Action Map — Clean (Actions + xT) — v2 (updated to use funnel-based xT measurement)
+# Action Map — Clean (Actions + xT) — v2 (updated to use smooth funnel transition xT measurement)
 import streamlit as st
 import matplotlib
 matplotlib.use("Agg")
@@ -130,31 +130,32 @@ COLOR_OTHER = "#bfc4ca"      # other successful (light gray)
 COLOR_FAIL = "#FF6B6B"       # failed (light red)
 
 # Draw sizes
-START_DOT_SIZE = 28  # slightly decreased
+START_DOT_SIZE = 28
 FIG_W, FIG_H = 7.9, 5.3
 FIG_DPI = 110
 
 # ==========================
-# New xT computation (funnel + attenuation + blending)
-# We'll compute a high-res continuous xT, apply funnel-based bonus with attenuation,
-# blend around the funnel border, then aggregate to the app's NXxNY grid.
-# The result is cached to avoid recomputation on each rerun.
+# New xT computation (smooth funnel transition)
 # ==========================
 @st.cache_data(show_spinner=False)
 def compute_xt_grid(
     NX=16,
     NY=12,
-    sub=24,                       # subdivisions per coarse cell (higher => more precise, slower)
+    sub=24,
     goal_width=11.0,
     penalty_depth=18.5,
     penalty_width=45.32,
     prox_w=0.65,
     central_w=0.35,
-    att_min=0.45,
-    att_prox_weight=0.7,
-    att_central_weight=0.3,
-    band_width_m=8.0,
-    blur_window_m=6.0,
+    internal_prox_power=2.4,
+    internal_central_power=1.8,
+    center_boost=0.20,
+    FUNNEL_INFLUENCE_RANGE=35.0,
+    FUNNEL_POWER=1.3,
+    BASE_BOOST_WEIGHT=0.15,
+    band_width_m=180.0,
+    blur_window_m=60.0,
+    final_blur_m=12.0,
 ):
     # Build high-res grid
     ncols_hr = NX * sub
@@ -166,14 +167,13 @@ def compute_xt_grid(
     y_centers_hr = (y_edges_hr[:-1] + y_edges_hr[1:]) / 2.0
     Xc_hr, Yc_hr = np.meshgrid(x_centers_hr, y_centers_hr)
 
-    # base continuous xT (same form as original)
+    # Base continuous xT (natural progression along field)
     xp = 0.01 + (Xc_hr / FIELD_X) * (1.0 - 0.01)
     yc = 1.0 - np.abs((Yc_hr / FIELD_Y) - 0.5) * 2.0
-    XT_RAW_hr = xp * (0.8 + 0.2 * yc)
-    # normalize base
-    XT_RAW_hr = (XT_RAW_hr - XT_RAW_hr.min()) / (XT_RAW_hr.max() - XT_RAW_hr.min() + 1e-12)
+    XT_BASE_hr = xp * (0.8 + 0.2 * yc)
+    XT_BASE_hr = (XT_BASE_hr - XT_BASE_hr.min()) / (XT_BASE_hr.max() - XT_BASE_hr.min() + 1e-12)
 
-    # define funnel polygon (same geometry as you set)
+    # Define funnel polygon
     center_y = FIELD_Y / 2.0
     left_goal_post = (FIELD_X, center_y - goal_width / 2.0)
     right_goal_post = (FIELD_X, center_y + goal_width / 2.0)
@@ -183,78 +183,10 @@ def compute_xt_grid(
     funnel_vertices = [left_goal_post, big_bottom_corner, big_top_corner, right_goal_post]
     funnel_path = Path(funnel_vertices)
 
-    # rasterize funnel mask
     pts = np.column_stack([Xc_hr.ravel(), Yc_hr.ravel()])
     inside_flags = funnel_path.contains_points(pts).reshape(Xc_hr.shape)
 
-    # proximity & centrality maps
-    goal_center = (FIELD_X, center_y)
-    D_hr = np.hypot(goal_center[0] - Xc_hr, goal_center[1] - Yc_hr)
-    max_dist = np.hypot(FIELD_X - 0.0, FIELD_Y / 2.0)
-    prox_hr = 1.0 - np.clip(D_hr / max_dist, 0.0, 1.0)
-    central_hr = 1.0 - np.clip(np.abs((Yc_hr - center_y) / center_y), 0.0, 1.0)
-
-    # unit bonus (weight=1) inside funnel
-    unit_bonus_hr = (prox_w * prox_hr + central_w * central_hr) * inside_flags.astype(float)
-
-    # attenuation factor (reduces bonus in far / lateral positions)
-    att_score_hr = (att_prox_weight * prox_hr + att_central_weight * central_hr)
-    att_hr = att_min + (1.0 - att_min) * att_score_hr
-    att_hr = np.clip(att_hr, att_min, 1.0)
-    att_effective_hr = att_hr * inside_flags.astype(float)
-    unit_bonus_eff_hr = unit_bonus_hr * att_effective_hr
-
-    # compute minimal weight to ensure inside_min > outside_max (min necessary)
-    base_hr = XT_RAW_hr
-    inside_base_vals = base_hr[inside_flags]
-    outside_base_vals = base_hr[~inside_flags]
-    outside_max = outside_base_vals.max() if outside_base_vals.size > 0 else -np.inf
-
-    if inside_base_vals.size == 0:
-        chosen_weight = 0.0
-    else:
-        base_inside_min = inside_base_vals.min()
-        unit_eff_inside = unit_bonus_eff_hr[inside_flags]
-        min_unit_eff_inside = unit_eff_inside.min() if unit_eff_inside.size > 0 else 0.0
-        if min_unit_eff_inside <= 1e-12:
-            chosen_weight = 0.0
-        else:
-            required_weight = (outside_max + 1e-12 - base_inside_min) / min_unit_eff_inside
-            chosen_weight = max(0.0, required_weight) + 1e-12
-
-    # apply bonus with chosen_weight
-    bonus_hr = chosen_weight * unit_bonus_eff_hr
-    XT_MOD_hr = base_hr + bonus_hr
-
-    # small fallback shift if still violated (rare)
-    inside_vals = XT_MOD_hr[inside_flags]
-    outside_vals = XT_MOD_hr[~inside_flags]
-    outside_max = outside_vals.max() if outside_vals.size > 0 else -np.inf
-    inside_min = inside_vals.min() if inside_vals.size > 0 else np.inf
-    if inside_min <= outside_max + 1e-12:
-        shift = (outside_max + 1e-12) - inside_min
-        XT_MOD_hr[inside_flags] = XT_MOD_hr[inside_flags] + shift
-
-    # --- smoothing: box blur used as blend reference
-    px_w = FIELD_X / ncols_hr
-    px_h = FIELD_Y / nrows_hr
-    rx = max(1, int(round((blur_window_m / px_w) / 2.0)))
-    ry = max(1, int(round((blur_window_m / px_h) / 2.0)))
-
-    def box_blur_2d(arr, rx, ry):
-        H, W = arr.shape
-        pad = ((ry, ry), (rx, rx))
-        a = np.pad(arr, pad_width=pad, mode='edge').astype(np.float64)
-        ii = a.cumsum(axis=0).cumsum(axis=1)
-        s = ii[2*ry : 2*ry + H, 2*rx : 2*rx + W].copy()
-        s += ii[0:H, 0:W]
-        s -= ii[0:H, 2*rx : 2*rx + W]
-        s -= ii[2*ry : 2*ry + H, 0:W]
-        return s / ((2*ry+1) * (2*rx+1))
-
-    smoothed_hr = box_blur_2d(XT_MOD_hr, rx, ry)
-
-    # compute distance to funnel boundary (sampling boundary densely)
+    # Distance to funnel boundary (dense sampling)
     boundary_pts = []
     for i in range(len(funnel_vertices)):
         a = funnel_vertices[i]
@@ -281,27 +213,63 @@ def compute_xt_grid(
         if mask.any():
             min_d2[mask] = d2[mask]
     min_dist = np.sqrt(min_d2).reshape(Xc_hr.shape)
-
     abs_dist = min_dist
-    w = np.clip(abs_dist / band_width_m, 0.0, 1.0)
-    XT_BLENDED_hr = w * XT_MOD_hr + (1.0 - w) * smoothed_hr
-    XT_COMBINED_hr = XT_BLENDED_hr
 
-    # final tiny shift safeguard
-    inside_vals_final_pre = XT_COMBINED_hr[inside_flags]
-    outside_vals_final_pre = XT_COMBINED_hr[~inside_flags]
-    outside_max_pre = outside_vals_final_pre.max() if outside_vals_final_pre.size > 0 else -np.inf
-    inside_min_pre = inside_vals_final_pre.min() if inside_vals_final_pre.size > 0 else np.inf
-    if inside_min_pre <= outside_max_pre + 1e-12:
-        shift = (outside_max_pre + 1e-12) - inside_min_pre
-        XT_COMBINED_hr[inside_flags] += shift
+    # Smooth funnel influence
+    norm_dist = np.clip(abs_dist / FUNNEL_INFLUENCE_RANGE, 0.0, 1.0)
+    influence_curve = (1.0 - norm_dist) ** FUNNEL_POWER
+    influence_curve = np.clip(influence_curve, 0.0, 1.0)
 
-    # normalize final high-res field
-    hr_min = XT_COMBINED_hr.min()
-    hr_max = XT_COMBINED_hr.max()
-    XT_FINAL_hr = (XT_COMBINED_hr - hr_min) / (hr_max - hr_min + 1e-12)
+    # Proximity and centrality bonuses
+    goal_center = (FIELD_X, center_y)
+    D_hr = np.hypot(goal_center[0] - Xc_hr, goal_center[1] - Yc_hr)
+    max_dist = np.hypot(FIELD_X - 0.0, FIELD_Y / 2.0)
+    prox_hr = 1.0 - np.clip(D_hr / max_dist, 0.0, 1.0)
+    central_hr = 1.0 - np.clip(np.abs((Yc_hr - center_y) / center_y), 0.0, 1.0)
 
-    # aggregate to coarse NXxNY by averaging blocks
+    prox_sharp = np.clip(prox_hr ** internal_prox_power, 0.0, 1.0)
+    central_sharp = np.clip(central_hr ** internal_central_power, 0.0, 1.0)
+    unit_bonus_internal = prox_w * prox_sharp + central_w * central_sharp
+    unit_bonus_internal = unit_bonus_internal * (1.0 + center_boost * prox_hr)
+    unit_bonus_internal = np.clip(unit_bonus_internal, 0.0, 1.0)
+
+    # Apply smooth funnel boost
+    XT_WITH_BOOST = XT_BASE_hr + influence_curve * BASE_BOOST_WEIGHT * unit_bonus_internal
+
+    # Smoothing
+    px_w = FIELD_X / ncols_hr
+    px_h = FIELD_Y / nrows_hr
+    rx = max(1, int(round((blur_window_m / px_w) / 2.0)))
+    ry = max(1, int(round((blur_window_m / px_h) / 2.0)))
+
+    def box_blur_2d(arr, rx, ry):
+        H, W = arr.shape
+        pad = ((ry, ry), (rx, rx))
+        a = np.pad(arr, pad_width=pad, mode='edge').astype(np.float64)
+        ii = a.cumsum(axis=0).cumsum(axis=1)
+        s = ii[2*ry : 2*ry + H, 2*rx : 2*rx + W].copy()
+        s += ii[0:H, 0:W]
+        s -= ii[0:H, 2*rx : 2*rx + W]
+        s -= ii[2*ry : 2*ry + H, 0:W]
+        return s / ((2*ry+1) * (2*rx+1))
+
+    smoothed_hr = box_blur_2d(XT_WITH_BOOST, rx, ry)
+
+    # Blend within influence zone
+    r = np.clip(abs_dist / band_width_m, 0.0, 1.0)
+    w = 0.5 * (1.0 - np.cos(np.pi * r))
+    XT_BLENDED = w * XT_WITH_BOOST + (1.0 - w) * smoothed_hr
+
+    # Final smoothing pass
+    rx_final = max(1, int(round((final_blur_m / px_w) / 2.0)))
+    ry_final = max(1, int(round((final_blur_m / px_h) / 2.0)))
+    XT_FINAL_BLUR = box_blur_2d(XT_BLENDED, rx_final, ry_final)
+    XT_FINAL_hr = 0.85 * XT_BLENDED + 0.15 * XT_FINAL_BLUR
+
+    # Normalize
+    XT_FINAL_hr = (XT_FINAL_hr - XT_FINAL_hr.min()) / (XT_FINAL_hr.max() - XT_FINAL_hr.min() + 1e-12)
+
+    # Aggregate to coarse NXxNY by averaging blocks
     XT_coarse = np.zeros((NY, NX))
     for iy in range(NY):
         for ix in range(NX):
@@ -309,21 +277,20 @@ def compute_xt_grid(
             r1 = (iy + 1) * sub
             c0 = ix * sub
             c1 = (ix + 1) * sub
-            block = XT_FINAL_hr[r0:r1, c0:c1]
-            XT_coarse[iy, ix] = block.mean()
+            XT_coarse[iy, ix] = XT_FINAL_hr[r0:r1, c0:c1].mean()
 
-    # normalize coarse again (safe)
     XT_coarse = (XT_coarse - XT_coarse.min()) / (XT_coarse.max() - XT_coarse.min() + 1e-12)
-
     return XT_coarse, XT_FINAL_hr, inside_flags
+
 
 # Replace old static XT_GRID with computed one
 XT_GRID, XT_FINAL_hr_cached, INSIDE_MASK_FINAL_HR = compute_xt_grid(
     NX=NX, NY=NY, sub=24,
     goal_width=11.0, penalty_depth=18.5, penalty_width=45.32,
-    prox_w=0.65, central_w=0.35, att_min=0.45,
-    att_prox_weight=0.7, att_central_weight=0.3,
-    band_width_m=8.0, blur_window_m=6.0
+    prox_w=0.65, central_w=0.35,
+    internal_prox_power=2.4, internal_central_power=1.8, center_boost=0.20,
+    FUNNEL_INFLUENCE_RANGE=35.0, FUNNEL_POWER=1.3, BASE_BOOST_WEIGHT=0.15,
+    band_width_m=180.0, blur_window_m=60.0, final_blur_m=12.0
 )
 
 # Keep xt lookup semantics: zone_index and xt_value
@@ -343,7 +310,6 @@ def xt_value(x, y):
 # ==========================
 matches_data = {
     "Ali vs Vancouver": [
-        # Positivos
         ("ACTION WON", 50.03, 5.76, 48.86, 14.07, None),
         ("ACTION WON", 42.05, 4.26, 65.82, 19.39, None),
         ("ACTION WON", 53.68, 12.57, 39.72, 28.20, None),
@@ -363,7 +329,6 @@ matches_data = {
         ("ACTION WON", 62.83, 3.43, 79.62, 7.25, None),
         ("ACTION WON", 53.18, 9.41, 68.98, 13.74, None),
         ("ACTION WON", 51.69, 4.76, 40.38, 8.58, None),
-        # Negativos
         ("ACTION LOST", 116.35, 2.93, 118.68, 11.74, None),
         ("ACTION LOST", 107.88, 10.58, 109.54, 39.83, None),
         ("ACTION LOST", 86.10, 3.43, 87.59, 4.09, None),
@@ -379,7 +344,6 @@ matches_data = {
         ("ACTION LOST", 99.90, 13.57, 98.90, 23.21, None),
     ],
     "Vs Dallas": [
-        # Positivos
         ("ACTION WON", 56.01, 3.43, 45.21, 8.08, None),
         ("ACTION WON", 44.04, 2.10, 38.22, 7.25, None),
         ("ACTION WON", 46.54, 11.24, 35.56, 9.91, None),
@@ -389,7 +353,6 @@ matches_data = {
         ("ACTION WON", 78.78, 21.05, 84.94, 20.72, None),
         ("ACTION WON", 75.79, 18.89, 86.60, 55.63, None),
         ("ACTION WON", 96.07, 39.00, 101.39, 39.00, None),
-        # Negativos
         ("ACTION LOST", 88.09, 12.24, 87.43, 4.26, None),
         ("ACTION LOST", 78.62, 4.76, 87.59, 1.60, None),
         ("ACTION LOST", 53.85, 1.60, 52.69, 1.10, None),
@@ -397,7 +360,6 @@ matches_data = {
         ("ACTION LOST", 40.22, 22.55, 91.09, 25.54, None),
     ],
     "vs Sagoya": [
-        # Sucesso
         ("ACTION WON", 116.19, 14.40, 109.54, 29.36, None),
         ("ACTION WON", 91.92, 3.43, 85.27, 7.75, None),
         ("ACTION WON", 57.51, 6.09, 56.01, 26.70, None),
@@ -415,7 +377,6 @@ matches_data = {
         ("ACTION WON", 23.59, 2.76, 32.07, 4.92, None),
         ("ACTION WON", 20.94, 14.23, 33.24, 7.25, None),
         ("ACTION WON", 14.62, 18.22, 6.64, 37.01, None),
-        # Falha
         ("ACTION LOST", 51.19, 3.59, 117.68, 14.07, None),
         ("ACTION LOST", 65.15, 6.59, 113.86, 20.05, None),
         ("ACTION LOST", 90.92, 2.76, 94.24, 4.76, None),
@@ -423,7 +384,6 @@ matches_data = {
         ("ACTION LOST", 84.44, 6.59, 91.09, 13.90, None),
     ],
     "Vs Busan Park": [
-        # Sucesso
         ("ACTION WON", 114.52, 19.05, 103.72, 21.22, None),
         ("ACTION WON", 92.25, 21.88, 112.20, 24.21, None),
         ("ACTION WON", 99.90, 23.21, 90.59, 24.87, None),
@@ -442,7 +402,6 @@ matches_data = {
         ("ACTION WON", 46.37, 51.47, 85.60, 46.48, None),
         ("ACTION WON", 88.26, 47.98, 107.21, 56.29, None),
         ("ACTION WON", 89.42, 50.31, 100.89, 65.10, None),
-        # Falha
         ("ACTION LOST", 113.53, 9.25, 119.01, 38.67, None),
         ("ACTION LOST", 63.16, 37.34, 80.95, 37.67, None),
         ("ACTION LOST", 58.34, 16.56, 67.65, 26.04, None),
@@ -450,7 +409,6 @@ matches_data = {
         ("ACTION LOST", 34.57, 57.95, 49.03, 55.63, None),
     ],
     "Vs Atlanta": [
-        # Sucesso
         ("ACTION WON", 95.08, 11.57, 94.41, 0.44, None),
         ("ACTION WON", 54.68, 14.23, 49.36, 19.22, None),
         ("ACTION WON", 33.74, 0.60, 28.42, 7.42, None),
@@ -460,7 +418,6 @@ matches_data = {
         ("ACTION WON", 53.85, 44.65, 80.95, 51.30, None),
         ("ACTION WON", 72.97, 36.18, 98.23, 65.60, None),
         ("ACTION WON", 102.56, 66.76, 93.08, 47.31, None),
-        # Falha
         ("ACTION LOST", 67.81, 69.59, 70.97, 78.73, None),
         ("ACTION LOST", 31.91, 2.43, 41.05, 13.40, None),
     ],
@@ -468,7 +425,6 @@ matches_data = {
 
 # ==========================
 # Helpers, DataFrames, Stats, Draw functions
-# (unchanged logic; xt_start/xt_end derived from new XT_GRID)
 # ==========================
 def has_video_value(v) -> bool:
     return pd.notna(v) and str(v).strip() != ""
@@ -485,11 +441,7 @@ def classify_action_direction(x_start, y_start, x_end, y_end) -> str:
     else:
         if dist > LATERAL_MIN_DIST:
             return "lateral"
-        else:
-            if dx >= 0:
-                return "forward"
-            else:
-                return "backward"
+        return "forward" if dx >= 0 else "backward"
 
 # Build DataFrames
 dfs_by_match = {}
@@ -503,7 +455,6 @@ for match_name, events in matches_data.items():
     dfm["is_forward"] = dfm["direction"] == "forward"
     dfm["is_backward"] = dfm["direction"] == "backward"
     dfm["is_lateral"] = dfm["direction"] == "lateral"
-    # xt_start/xt_end use the new XT_GRID via xt_value()
     dfm["xt_start"] = dfm.apply(lambda r: xt_value(r["x_start"], r["y_start"]), axis=1)
     dfm["xt_end"] = dfm.apply(lambda r: xt_value(r["x_end"], r["y_end"]), axis=1)
     dfm["delta_xt"] = np.where(dfm["outcome"].eq("successful"), dfm["xt_end"] - dfm["xt_start"], 0.0)
@@ -522,23 +473,24 @@ def compute_stats(df: pd.DataFrame) -> dict:
     forward_total = int(df["is_forward"].sum())
     backward_total = int(df["is_backward"].sum())
     lateral_total = int(df["is_lateral"].sum())
-    # xT metrics (only for successful actions)
+
     pos_mask = (df["outcome"] == "successful") & (df["delta_xt"] > 0)
     pos_count = int(pos_mask.sum())
     pos_sum = float(df.loc[pos_mask, "delta_xt"].sum()) if pos_count else 0.0
     pos_mean = float(df.loc[pos_mask, "delta_xt"].mean()) if pos_count else 0.0
     pos_pct = (pos_count / total_actions * 100.0) if total_actions else 0.0
-    # Top 5 positive ΔxT table (successful)
+
     top5_df = pd.DataFrame()
     if pos_count:
         top5_df = df.loc[pos_mask].sort_values("delta_xt", ascending=False).head(5)[
             ["number", "type", "x_start", "y_start", "x_end", "y_end", "xt_start", "xt_end", "delta_xt"]
         ].reset_index(drop=True)
-    # Failed actions xT "contrário": loss of xT opportunity measured by xt_start at failure
+
     failed_mask = df["outcome"] == "failed"
     failed_count = int(failed_mask.sum())
     failed_xt_lost_sum = float(df.loc[failed_mask, "xt_start"].sum()) if failed_count else 0.0
     failed_xt_lost_mean = float(df.loc[failed_mask, "xt_start"].mean()) if failed_count else 0.0
+
     return {
         "total_actions": total_actions,
         "successful_actions": successful,
@@ -557,10 +509,6 @@ def compute_stats(df: pd.DataFrame) -> dict:
         "failed_xt_lost_mean": round(failed_xt_lost_mean, 4),
     }
 
-# ==========================
-# Draw functions (clean map: no end 'x', smaller start dot)
-# (unchanged)
-# ==========================
 def draw_action_map(df: pd.DataFrame, title: str, top_n_highlight: int = 20):
     pitch = Pitch(pitch_type="statsbomb", pitch_color="#1a1a2e", line_color="#ffffff", line_alpha=0.95)
     fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
@@ -569,7 +517,6 @@ def draw_action_map(df: pd.DataFrame, title: str, top_n_highlight: int = 20):
     ax.axvline(x=FINAL_THIRD_LINE_X, color="#FFD54F", linewidth=1.0, alpha=0.20)
     ax.axvline(x=HALF_LINE_X, color="#ffffff", linewidth=0.6, alpha=0.12, linestyle="--")
 
-    # identify top N (by delta_xt among successful) within the provided df
     top_idxs = set()
     if not df.empty:
         df_success = df[df["outcome"] == "successful"]
@@ -578,7 +525,6 @@ def draw_action_map(df: pd.DataFrame, title: str, top_n_highlight: int = 20):
 
     for idx, row in df.iterrows():
         is_lost = not row["is_won"]
-        # color & alpha
         if is_lost:
             color = COLOR_FAIL
             alpha = 0.88
@@ -589,11 +535,11 @@ def draw_action_map(df: pd.DataFrame, title: str, top_n_highlight: int = 20):
             else:
                 color = COLOR_OTHER
                 alpha = 0.20
-        # arrows without end marker
+
         pitch.arrows(row["x_start"], row["y_start"], row["x_end"], row["y_end"],
                      color=color, width=1.6, headwidth=2.5, headlength=2.5,
                      ax=ax, zorder=3, alpha=alpha)
-        # start dot smaller and less dominant
+
         if has_video_value(row["video"]):
             pitch.scatter(row["x_start"], row["y_start"], s=68, marker="o", facecolors="none",
                           edgecolors="#FFD54F", linewidths=2.0, ax=ax, zorder=5, alpha=alpha)
@@ -602,7 +548,7 @@ def draw_action_map(df: pd.DataFrame, title: str, top_n_highlight: int = 20):
 
     ax.set_title(title, fontsize=12, color="#ffffff", pad=8)
     legend_elements = [
-        Line2D([0], [0], color=COLOR_TOP, lw=2.5, label=f"Top ΔxT (highlight)"),
+        Line2D([0], [0], color=COLOR_TOP, lw=2.5, label="Top ΔxT (highlight)"),
         Line2D([0], [0], color=COLOR_OTHER, lw=2.5, label="Other successful"),
         Line2D([0], [0], color=COLOR_FAIL, lw=2.5, label="Failed"),
     ]
@@ -612,10 +558,12 @@ def draw_action_map(df: pd.DataFrame, title: str, top_n_highlight: int = 20):
     for txt in legend.get_texts():
         txt.set_color("white")
     legend.get_frame().set_alpha(0.92)
+
     arrow = FancyArrowPatch((0.45, 0.05), (0.55, 0.05), transform=fig.transFigure,
-                           arrowstyle="-|>", mutation_scale=15, linewidth=2, color="#cccccc")
+                            arrowstyle="-|>", mutation_scale=15, linewidth=2, color="#cccccc")
     fig.patches.append(arrow)
     fig.text(0.5, 0.02, "Attack Direction", ha="center", va="center", fontsize=9, color="#cccccc")
+
     fig.tight_layout()
     fig.canvas.draw()
     buf = BytesIO()
@@ -631,6 +579,7 @@ def draw_corridor_heatmap(df: pd.DataFrame, title: str = "Zone Heatmap — Compl
     right_y0, right_y1 = 0.0, LANE_RIGHT_MAX
     center_y0, center_y1 = LANE_RIGHT_MAX, LANE_LEFT_MIN
     corridors = {"left": (left_y0, left_y1), "center": (center_y0, center_y1), "right": (right_y0, right_y1)}
+
     counts = {}
     for cname, (y0, y1) in corridors.items():
         arr = np.zeros(6, dtype=int)
@@ -640,22 +589,26 @@ def draw_corridor_heatmap(df: pd.DataFrame, title: str = "Zone Heatmap — Compl
                     & (df_success["y_end"] >= y0) & (df_success["y_end"] < y1))
             arr[i] = int(mask.sum())
         counts[cname] = arr
+
     all_vals = np.concatenate([counts[c] for c in counts]) if counts else np.array([0])
     vmax = max(1, int(all_vals.max()))
+
     pitch = Pitch(pitch_type="statsbomb", pitch_color="#1a1a2e", line_color="#ffffff", line_alpha=0.95)
     fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
     fig.set_facecolor("#1a1a2e")
     fig.set_dpi(FIG_DPI)
+
     cmap = LinearSegmentedColormap.from_list("white_red", ["#ffffff", "#ffecec", "#ffbfbf", "#ff8080", "#ff3b3b", "#ff0000"])
     norm = Normalize(vmin=0, vmax=vmax)
     text_light_threshold = max(1, vmax * 0.35)
+
     for cname, (y0, y1) in corridors.items():
         arr = counts[cname]
         for i in range(6):
             x0, x1 = x_bins[i], x_bins[i + 1]
             value = arr[i]
             color = cmap(norm(value))
-            rect = Rectangle((x0, y0), x1 - x0, y1 - y0, facecolor=color, edgecolor=(1.0, 1.0, 1.0, 0.12),
+            rect = Rectangle((x0, y0), x1 - x0, y1 - y0, facecolor=color, edgecolor=(1, 1, 1, 0.12),
                              linewidth=0.6, alpha=0.95, zorder=2)
             ax.add_patch(rect)
             cx = (x0 + x1) / 2.0
@@ -663,12 +616,16 @@ def draw_corridor_heatmap(df: pd.DataFrame, title: str = "Zone Heatmap — Compl
             text_color = "#000000" if value <= text_light_threshold else "#ffffff"
             fontw = "700" if value >= vmax * 0.5 else "600"
             ax.text(cx, cy, str(value), ha="center", va="center", color=text_color, fontsize=11, fontweight=fontw, zorder=4)
+
     ax.set_title(title, fontsize=12, color="#ffffff", pad=8)
     ax.axhline(y=LANE_LEFT_MIN, color="#ffffff", linewidth=0.5, alpha=0.15, linestyle="--", zorder=3)
     ax.axhline(y=LANE_RIGHT_MAX, color="#ffffff", linewidth=0.5, alpha=0.15, linestyle="--", zorder=3)
-    arrow = FancyArrowPatch((0.45, 0.05), (0.55, 0.05), transform=fig.transFigure, arrowstyle="-|>", mutation_scale=15, linewidth=2, color="#cccccc")
+
+    arrow = FancyArrowPatch((0.45, 0.05), (0.55, 0.05), transform=fig.transFigure,
+                            arrowstyle="-|>", mutation_scale=15, linewidth=2, color="#cccccc")
     fig.patches.append(arrow)
     fig.text(0.5, 0.02, "Attack Direction", ha="center", va="center", fontsize=9, color="#cccccc")
+
     fig.tight_layout()
     fig.canvas.draw()
     buf = BytesIO()
@@ -678,8 +635,7 @@ def draw_corridor_heatmap(df: pd.DataFrame, title: str = "Zone Heatmap — Compl
     return img_obj, ax, fig
 
 # ==========================
-# Layout: Filters / Field / Stats
-# (rest of app unchanged; uses XT_GRID via xt_value)
+# Layout
 # ==========================
 col_filters, col_field, col_stats = st.columns([0.9, 2, 1], gap="large")
 
@@ -699,7 +655,7 @@ with col_filters:
             "Positive xT only (successful)",
             "High xT only (successful)"
         ],
-        index=0,  # default All Actions
+        index=0,
     )
     st.markdown("<div style='margin-top:8px; color:#e6e6e6;'>Top N / High xT controls</div>", unsafe_allow_html=True)
     top_n = st.number_input("Top N (for Top N actions)", min_value=1, max_value=100, value=20, step=1)
@@ -707,7 +663,6 @@ with col_filters:
                              min_value=0.0, max_value=0.5, value=0.03, step=0.005)
     st.markdown('</div>', unsafe_allow_html=True)
 
-# session state for heat selection
 if "heat_selection" not in st.session_state:
     st.session_state["heat_selection"] = None
 if "last_match" not in st.session_state:
@@ -715,7 +670,6 @@ if "last_match" not in st.session_state:
 if "last_filter" not in st.session_state:
     st.session_state["last_filter"] = action_filter
 
-# Clear heat selection automatically if match or filter changed
 if st.session_state["last_match"] != selected_match:
     st.session_state["heat_selection"] = None
     st.session_state["last_match"] = selected_match
@@ -726,14 +680,12 @@ if st.session_state["last_filter"] != action_filter:
 with col_field:
     df_base = full_data[selected_match].copy()
 
-    # Apply selected display filter (this determines which rows are drawn)
     if action_filter == "All Actions":
         df_base = df_base.reset_index(drop=True)
     elif action_filter == "Top N actions (ΔxT)":
         df_success = df_base[df_base["outcome"] == "successful"].copy()
         if not df_success.empty:
-            df_sorted = df_success.sort_values("delta_xt", ascending=False).head(int(top_n))
-            df_base = df_sorted.reset_index(drop=True)
+            df_base = df_success.sort_values("delta_xt", ascending=False).head(int(top_n)).reset_index(drop=True)
         else:
             df_base = df_success.reset_index(drop=True)
     elif action_filter == "Unsuccessful actions":
@@ -748,7 +700,6 @@ with col_field:
     DISPLAY_WIDTH = 780
     pass_map_placeholder = st.empty()
 
-    # ---- Heatmap (render & handle click first) ----
     st.markdown('<h4 style="color:#ffffff; margin:6px 0 6px 0;">Zone Heatmap</h4>', unsafe_allow_html=True)
     heat_img, hax, hfig = draw_corridor_heatmap(df_base)
     heat_click = streamlit_image_coordinates(heat_img, width=DISPLAY_WIDTH)
@@ -766,32 +717,27 @@ with col_field:
         ix = max(0, min(5, ix))
         x0, x1 = x_bins[ix], x_bins[ix + 1]
         if field_y >= LANE_LEFT_MIN:
-            cname = "left"; y0, y1 = LANE_LEFT_MIN, FIELD_Y
+            cname, y0, y1 = "left", LANE_LEFT_MIN, FIELD_Y
         elif field_y < LANE_RIGHT_MAX:
-            cname = "right"; y0, y1 = 0.0, LANE_RIGHT_MAX
+            cname, y0, y1 = "right", 0.0, LANE_RIGHT_MAX
         else:
-            cname = "center"; y0, y1 = LANE_RIGHT_MAX, LANE_LEFT_MIN
+            cname, y0, y1 = "center", LANE_RIGHT_MAX, LANE_LEFT_MIN
         st.session_state["heat_selection"] = {"ix": int(ix), "corridor": cname, "x0": float(x0), "x1": float(x1), "y0": float(y0), "y1": float(y1)}
     plt.close(hfig)
 
-    # ---- Render Action Map placeholder: title + clear button ----
     with pass_map_placeholder.container():
         st.markdown('<h4 style="color:#ffffff; margin:0 0 6px 0;">Action Map</h4>', unsafe_allow_html=True)
         if st.button("Limpar filtro do quadrante", key="clear_heat_filter"):
             st.session_state["heat_selection"] = None
 
-        # apply heat selection filter on top of the main filter (if any)
         df_to_draw = df_base
         if st.session_state["heat_selection"] is not None:
             sel = st.session_state["heat_selection"]
             df_to_draw = df_base[
-                (df_base["x_end"] >= sel["x0"])
-                & (df_base["x_end"] < sel["x1"])
-                & (df_base["y_end"] >= sel["y0"])
-                & (df_base["y_end"] < sel["y1"])
+                (df_base["x_end"] >= sel["x0"]) & (df_base["x_end"] < sel["x1"]) &
+                (df_base["y_end"] >= sel["y0"]) & (df_base["y_end"] < sel["y1"])
             ].reset_index(drop=True)
 
-        # Draw action map. For highlighting top N inside the drawn set we pass top_n
         img_obj, ax, fig = draw_action_map(df_to_draw, title=f"Action Map — {selected_match}", top_n_highlight=int(top_n))
         click = streamlit_image_coordinates(img_obj, width=DISPLAY_WIDTH)
 
@@ -806,30 +752,23 @@ with col_field:
         field_x, field_y = ax.transData.inverted().transform((pixel_x, mpl_pixel_y))
         df_sel = df_to_draw.copy()
         df_sel["dist"] = np.sqrt((df_sel["x_start"] - field_x) ** 2 + (df_sel["y_start"] - field_y) ** 2)
-        RADIUS = 5.0
-        candidates = df_sel[df_sel["dist"] < RADIUS].copy()
+        candidates = df_sel[df_sel["dist"] < 5.0].copy()
         if not candidates.empty:
-            candidates = candidates.sort_values(by="dist", ascending=True)
-            selected_action = candidates.iloc[0]
+            selected_action = candidates.sort_values(by="dist", ascending=True).iloc[0]
     plt.close(fig)
 
-    # display heat selection info
     if st.session_state["heat_selection"] is not None:
         sel = st.session_state["heat_selection"]
         sel_mask = (
-            (df_base["x_end"] >= sel["x0"])
-            & (df_base["x_end"] < sel["x1"])
-            & (df_base["y_end"] >= sel["y0"])
-            & (df_base["y_end"] < sel["y1"])
+            (df_base["x_end"] >= sel["x0"]) & (df_base["x_end"] < sel["x1"]) &
+            (df_base["y_end"] >= sel["y0"]) & (df_base["y_end"] < sel["y1"])
         )
         sel_count = int(sel_mask.sum())
         st.markdown(
-            f"<div style='color:#ffffff; margin-top:6px;'>"
-            f"<strong>Filtro aplicado:</strong> corredor <code>{sel['corridor']}</code>, coluna X #{sel['ix']+1} — {sel_count} ações</div>",
+            f"<div style='color:#ffffff; margin-top:6px;'><strong>Filtro aplicado:</strong> corredor <code>{sel['corridor']}</code>, coluna X #{sel['ix']+1} — {sel_count} ações</div>",
             unsafe_allow_html=True,
         )
 
-    # ---- Selected Action and data table ----
     st.divider()
     st.subheader("Selected Action")
     if selected_action is None:
@@ -853,6 +792,7 @@ with col_field:
         xt_col2.metric("xT Start", f"{selected_action['xt_start']:.4f}")
         xt_col3.metric("xT End", f"{selected_action['xt_end']:.4f}")
         xt_col4.metric("ΔxT", f"{selected_action['delta_xt']:.4f}", delta=f"{selected_action['delta_xt']:.4f}" if selected_action["delta_xt"] != 0 else None)
+
         if has_video_value(selected_action["video"]):
             try:
                 st.video(selected_action["video"])
@@ -881,7 +821,6 @@ with col_field:
             height=400,
         )
 
-# RIGHT: Statistics (based on df_to_draw)
 with col_stats:
     stats_safe = compute_stats(df_to_draw)
     with st.expander("General Statistics", expanded=False):
@@ -902,6 +841,7 @@ with col_stats:
             small_metric("⬇️ Backward", f"{stats_safe['backward_total']}")
         with dir3:
             small_metric("↔️ Lateral", f"{stats_safe['lateral_total']}")
+
     with st.expander("Advanced Statistics (xT)", expanded=True):
         st.markdown('<div class="stats-section-title">Expected Threat (xT)</div>', unsafe_allow_html=True)
         xt1, xt2, xt3 = st.columns(3)
@@ -912,6 +852,7 @@ with col_stats:
         with xt3:
             small_metric("% Actions ΔxT > 0", f"{stats_safe['positive_xt_pct']:.1f}%")
         st.markdown("<hr style='margin:6px 0 8px 0;'>", unsafe_allow_html=True)
+
         st.markdown('<div class="stats-section-title">Top 5 ΔxT (positives)</div>', unsafe_allow_html=True)
         if not stats_safe["top5_positive_table"].empty:
             st.dataframe(
@@ -926,6 +867,7 @@ with col_stats:
         else:
             st.write("No positive ΔxT actions to show.")
         st.markdown("<hr style='margin:6px 0 8px 0;'>", unsafe_allow_html=True)
+
         st.markdown('<div class="stats-section-title">Failed actions (xT contrários)</div>', unsafe_allow_html=True)
         fx1, fx2, fx3 = st.columns(3)
         with fx1:
@@ -934,5 +876,6 @@ with col_stats:
             small_metric("Σ xT (start) — failed", f"{stats_safe['failed_xt_lost_sum']:.4f}")
         with fx3:
             small_metric("Mean xT (start) — failed", f"{stats_safe['failed_xt_lost_mean']:.4f}")
+
     st.divider()
     st.caption("Notas: ΔxT é contabilizado apenas para ações bem-sucedidas; 'xT contrários' = soma/ média de xT do ponto inicial de ações falhadas (indica perda de posse em zonas perigosas).")
