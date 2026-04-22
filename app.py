@@ -1104,9 +1104,7 @@ def render_direction_cards(stats):
 
         html += (
 
-            '<div style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);'
-
-            'border-radius:10px;padding:8px 9px;">'
+            '<div style="padding:2px 2px;">'
 
             f'<div style="display:flex;align-items:center;justify-content:space-between;'
 
@@ -1521,15 +1519,7 @@ with tab_maps:
 
             st.metric('Distance', f'{selected_action["action_distance"]:.1f}m')
 
-            st.metric('xT Start', f'{selected_action["xt_start"]:.4f}')
-
-            st.metric('xT End', f'{selected_action["xt_end"]:.4f}')
-
-            st.metric('ΔxT', f'{selected_action["delta_xt"]:.4f}')
-
-            st.metric('Dist Bonus', f'+{selected_action["dist_bonus"]*100:.1f}%')
-
-            st.metric('ΔxT (Adj.)', f'{selected_action["delta_xt_adj"]:.4f}')
+            st.metric('ΔxT', f'{selected_action["delta_xt_adj"]:.4f}')
 
             if has_video_value(selected_action['video']):
 
@@ -1609,25 +1599,37 @@ with tab_stats:
 
             st.markdown('<hr style="margin:6px 0 8px 0;">', unsafe_allow_html=True)
 
-            st.markdown('<div class="stats-section-title">Top 10 / End xT / Failed</div>', unsafe_allow_html=True)
+            st.markdown('<div class="stats-section-title">Top 10</div>', unsafe_allow_html=True)
 
-            b1, b2, b3, b4 = st.columns(4)
+            t1, t2 = st.columns(2)
 
-            with b1: small_metric('Σ Top10', f"{stats['top10_sum']:.2f}")
+            with t1: small_metric('Σ Top10', f"{stats['top10_sum']:.2f}")
 
-            with b2: small_metric('Avg. Top10', f"{stats['top10_mean']:.2f}")
-
-            with b3: small_metric('Σ End xT', f"{stats['xt_end_sum']:.2f}")
-
-            with b4: small_metric('Avg. End xT', f"{stats['xt_end_mean']:.2f}")
+            with t2: small_metric('Avg. Top10', f"{stats['top10_mean']:.2f}")
 
 
 
-            c1, c2 = st.columns(2)
+            st.markdown('<hr style="margin:6px 0 8px 0;">', unsafe_allow_html=True)
 
-            with c1: small_metric('Σ xT Start (Failed)', f"{stats['failed_xt_sum']:.2f}")
+            st.markdown('<div class="stats-section-title">End xT</div>', unsafe_allow_html=True)
 
-            with c2: small_metric('Avg. xT (Failed)', f"{stats['failed_xt_mean']:.2f}")
+            e1, e2 = st.columns(2)
+
+            with e1: small_metric('Σ End xT', f"{stats['xt_end_sum']:.2f}")
+
+            with e2: small_metric('Avg. End xT', f"{stats['xt_end_mean']:.2f}")
+
+
+
+            st.markdown('<hr style="margin:6px 0 8px 0;">', unsafe_allow_html=True)
+
+            st.markdown('<div class="stats-section-title">Failed</div>', unsafe_allow_html=True)
+
+            f1, f2 = st.columns(2)
+
+            with f1: small_metric('Σ xT Start (Failed)', f"{stats['failed_xt_sum']:.2f}")
+
+            with f2: small_metric('Avg. xT (Failed)', f"{stats['failed_xt_mean']:.2f}")
 
 
 
