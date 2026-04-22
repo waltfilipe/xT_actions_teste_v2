@@ -1,4 +1,4 @@
-# Action Map — Clean (Actions + xT) — v7 [Adaptive Alpha by Density]
+# Action Map — Clean (Actions + xT) — v7 [Parallel Offsets / Jitter]
 import streamlit as st
 import matplotlib
 matplotlib.use("Agg")
@@ -11,8 +11,7 @@ from io import BytesIO
 from matplotlib.patches import FancyArrowPatch, Rectangle
 from streamlit_image_coordinates import streamlit_image_coordinates
 from matplotlib.colors import Normalize, LinearSegmentedColormap
-from matplotlib.path import Path
-from scipy.stats import gaussian_kde
+from collections import defaultdict
 import math
 
 # ==========================
@@ -76,15 +75,11 @@ FIG_W, FIG_H = 7.9, 5.3
 FIG_DPI      = 110
 
 # ==========================
-# Adaptive Alpha — defaults
+# Parallel Offset constants
 # ==========================
-# Alpha mínimo e máximo para ações comuns (não-top).
-# Ações em regiões densas recebem alpha mais baixo;
-# ações isoladas ficam com alpha mais alto.
-ALPHA_MIN_DEFAULT = 0.12   # alpha em regiões muito densas
-ALPHA_MAX_DEFAULT = 0.72   # alpha em regiões pouco densas
-# Top-N sempre renderiza com alpha fixo alto, independente da densidade.
-ALPHA_TOP_FIXED   = 0.95
+# Resolução da grade usada para detectar ações "próximas"
+OFFSET_GRID_X = 10   # colunas (quanto menor, mais ações agrupadas)
+OFFSET_GRID_Y =  8   # linhas
 
 # ==========================
 # Distance bonus
@@ -311,9 +306,9 @@ def has_video_value(v):
     return pd.notna(v) and str(v).strip() != ""
 
 def classify_action_direction(x0, y0, x1, y1):
-    dx,dy = x1-x0, y1-y0
-    dist  = np.sqrt(dx**2+dy**2)
-    ang   = np.degrees(np.arctan2(abs(dy), dx))
+    dx, dy = x1-x0, y1-y0
+    dist   = np.sqrt(dx**2+dy**2)
+    ang    = np.degrees(np.arctan2(abs(dy), dx))
     if ang <= 45:  return "forward"
     if ang >= 135: return "backward"
     return "lateral" if dist > LATERAL_MIN_DIST else ("forward" if dx >= 0 else "backward")
@@ -404,102 +399,110 @@ def compute_stats(df):
     }
 
 # ==========================
-# ── ADAPTIVE ALPHA BY DENSITY ──
+# ── PARALLEL OFFSETS ──
 #
-# Ideia central:
-#   1. Usa KDE (Kernel Density Estimation) sobre os pontos de ORIGEM de
-#      todas as ações do DataFrame atual.
-#   2. Avalia a densidade em cada ponto de origem.
-#   3. Normaliza os valores de densidade para [0, 1].
-#   4. Mapeia de forma INVERSA: alta densidade → alpha baixo (mais transparente),
-#      baixa densidade → alpha alto (mais opaco).
-#   5. Top-N ações ignoram a densidade e sempre recebem alpha fixo alto.
+# Princípio:
+#   Duas ações são "vizinhas" se suas células de grade (origem E destino)
+#   são idênticas. Para cada grupo de vizinhos, calculamos o vetor
+#   perpendicular médio ao segmento e deslocamos TODOS os pontos
+#   (início e fim) simetricamente ao redor do eixo original.
+#   O resultado são linhas paralelas deslocadas, sem sobreposição,
+#   mantendo a direção e o comprimento originais.
 #
-# Parâmetros expostos via slider no painel lateral:
-#   alpha_min  — alpha mínimo (regiões muito densas)
-#   alpha_max  — alpha máximo (regiões pouco densas / isoladas)
+# Parâmetro `offset_step`:
+#   distância (unidades de campo) entre linhas adjacentes dentro
+#   de um mesmo grupo. Controlado por slider na UI.
 # ==========================
 
-def compute_density_alphas(
+def compute_parallel_offsets(
     df: pd.DataFrame,
-    top_idxs: set,
-    alpha_min: float = ALPHA_MIN_DEFAULT,
-    alpha_max: float = ALPHA_MAX_DEFAULT,
-) -> np.ndarray:
+    offset_step: float = 1.5,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
-    Calcula um alpha por linha do DataFrame usando KDE sobre x_start / y_start.
+    Retorna quatro arrays (xs0, ys0, xs1, ys1) com as coordenadas
+    deslocadas de início e fim de cada ação após aplicar o offset
+    perpendicular paralelo.
+
+    Parâmetros
+    ----------
+    df          : DataFrame com x_start, y_start, x_end, y_end
+    offset_step : passo de deslocamento em unidades de campo entre
+                  linhas do mesmo grupo (default 1.5 m)
 
     Retorna
     -------
-    alphas : np.ndarray shape (len(df),) com valores em [alpha_min, alpha_max]
-             — exceto top_idxs que ficam em ALPHA_TOP_FIXED.
+    xs0, ys0 : arrays dos pontos de início deslocados  (shape n,)
+    xs1, ys1 : arrays dos pontos de fim   deslocados  (shape n,)
     """
-    n = len(df)
-    alphas = np.full(n, alpha_max)
+    n   = len(df)
+    xs0 = df["x_start"].values.copy().astype(float)
+    ys0 = df["y_start"].values.copy().astype(float)
+    xs1 = df["x_end"].values.copy().astype(float)
+    ys1 = df["y_end"].values.copy().astype(float)
 
-    if n < 2:
-        # Único ponto: não há como estimar densidade, usa alpha_max
-        return alphas
+    if n == 0:
+        return xs0, ys0, xs1, ys1
 
-    xs = df["x_start"].values.astype(float)
-    ys = df["y_start"].values.astype(float)
+    # ── Bucketing: célula de origem e de destino ──
+    # Quanto menor a grade, mais ações caem no mesmo grupo.
+    sx = np.clip((xs0 / FIELD_X * OFFSET_GRID_X).astype(int), 0, OFFSET_GRID_X - 1)
+    sy = np.clip((ys0 / FIELD_Y * OFFSET_GRID_Y).astype(int), 0, OFFSET_GRID_Y - 1)
+    ex = np.clip((xs1 / FIELD_X * OFFSET_GRID_X).astype(int), 0, OFFSET_GRID_X - 1)
+    ey = np.clip((ys1 / FIELD_Y * OFFSET_GRID_Y).astype(int), 0, OFFSET_GRID_Y - 1)
 
-    # KDE com bandwidth automático (regra de Scott)
-    # Normaliza coordenadas para [0,1] antes de passar ao KDE para que
-    # os dois eixos (120 m × 80 m) tenham peso comparável.
-    xs_n = xs / FIELD_X
-    ys_n = ys / FIELD_Y
+    # Agrupa índices pela chave (célula_orig, célula_dest)
+    groups: dict = defaultdict(list)
+    for i in range(n):
+        groups[(sx[i], sy[i], ex[i], ey[i])].append(i)
 
-    try:
-        kde    = gaussian_kde(np.vstack([xs_n, ys_n]))
-        # Avalia a densidade em cada ponto de origem
-        dens   = kde(np.vstack([xs_n, ys_n]))           # shape (n,)
-    except np.linalg.LinAlgError:
-        # Falha do KDE (pontos colineares) — mantém alpha_max para todos
-        return alphas
+    for key, idxs in groups.items():
+        m = len(idxs)
+        if m == 1:
+            # Ação isolada — sem deslocamento
+            continue
 
-    # Normaliza densidades para [0, 1]
-    d_min, d_max = dens.min(), dens.max()
-    if d_max - d_min < 1e-12:
-        # Todos os pontos equidistantes — alpha uniforme
-        return alphas
+        # ── Vetor médio do grupo ──
+        # Usa a média das direções para definir o eixo perpendicular
+        # compartilhado por todas as ações desse feixe.
+        mean_dx = float(np.mean(xs1[idxs] - xs0[idxs]))
+        mean_dy = float(np.mean(ys1[idxs] - ys0[idxs]))
+        length  = math.hypot(mean_dx, mean_dy)
 
-    dens_norm = (dens - d_min) / (d_max - d_min)   # 0 = isolado, 1 = mais denso
+        if length < 1e-6:
+            # Segmentos degenerados (ponto fixo) — jitter puro em Y
+            perp_x, perp_y = 0.0, 1.0
+        else:
+            # Perpendicular unitário (rotação 90° anti-horário)
+            perp_x = -mean_dy / length
+            perp_y =  mean_dx / length
 
-    # Mapeamento INVERSO: alpha ∝ 1 - densidade_normalizada
-    # Usa uma função côncava (raiz quadrada) para suavizar a queda de alpha
-    # em densidades médias — evita que tudo fique muito transparente de uma vez.
-    inv_dens = 1.0 - dens_norm                      # 1 = isolado, 0 = mais denso
-    inv_dens = np.sqrt(inv_dens)                     # suaviza a curva
+        # ── Distribui os offsets simetricamente ──
+        # ex.: m=4  →  [-1.5*s, -0.5*s, +0.5*s, +1.5*s]
+        #      m=3  →  [-1*s,    0,     +1*s   ]
+        half   = (m - 1) / 2.0
+        offsets = [(j - half) * offset_step for j in range(m)]
 
-    alphas_raw = alpha_min + inv_dens * (alpha_max - alpha_min)
+        for j, i in enumerate(idxs):
+            d = offsets[j]
+            xs0[i] += perp_x * d
+            ys0[i] += perp_y * d
+            xs1[i] += perp_x * d
+            ys1[i] += perp_y * d
 
-    # Índices no array posicional (0..n-1) que correspondem aos top_idxs do df.index
-    idx_list = list(df.index)
-    for pos, idx in enumerate(idx_list):
-        if idx in top_idxs:
-            alphas_raw[pos] = ALPHA_TOP_FIXED        # top-N sempre visível
-
-    return alphas_raw
+    return xs0, ys0, xs1, ys1
 
 
 # ==========================
 # Draw helpers
 # ==========================
-def _action_style_base(is_won, is_top):
-    """
-    Retorna (lw, linestyle, s_start, s_end) — sem alpha,
-    pois o alpha agora é calculado pela densidade.
-    """
-    if not is_won:  return 1.0, ":",  12, 18
-    if is_top:      return 2.0, "--", 22, 62
-    return 1.3, "--", 14, 32
+def _action_style(is_won: bool, is_top: bool):
+    """Retorna (lw, linestyle, alpha, s_start, s_end)"""
+    if not is_won: return 1.0, ":",  0.28, 12, 18
+    if is_top:     return 2.0, "--", 0.95, 22, 62
+    return 1.3, "--", 0.42, 14, 32
 
 
-def draw_action_map(df, title, top_n_highlight=20,
-                    alpha_min=ALPHA_MIN_DEFAULT,
-                    alpha_max=ALPHA_MAX_DEFAULT):
-
+def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
     pitch = Pitch(pitch_type="statsbomb", pitch_color="#1a1a2e",
                   line_color="#ffffff", line_alpha=0.95)
     fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
@@ -507,7 +510,7 @@ def draw_action_map(df, title, top_n_highlight=20,
     ax.axvline(x=FINAL_THIRD_LINE_X, color="#FFD54F", lw=1.0, alpha=0.20)
     ax.axvline(x=HALF_LINE_X,        color="#ffffff", lw=0.6, alpha=0.12, linestyle="--")
 
-    # ── Identifica top-N ──
+    # ── Top-N index set ──
     top_idxs = set()
     if not df.empty:
         df_s = df[df["outcome"] == "successful"]
@@ -517,88 +520,89 @@ def draw_action_map(df, title, top_n_highlight=20,
                     .head(top_n_highlight).index
             )
 
-    # ── Calcula alphas adaptativos ──
-    alphas = compute_density_alphas(df, top_idxs,
-                                    alpha_min=alpha_min,
-                                    alpha_max=alpha_max)
+    # ── Calcula offsets paralelos para TODO o df ──
+    xs0_off, ys0_off, xs1_off, ys1_off = compute_parallel_offsets(
+        df, offset_step=offset_step
+    )
 
-    # Mapa posicional: índice do df.index → posição no array
-    idx_to_pos = {idx: pos for pos, idx in enumerate(df.index)}
-
-    def draw_row(row, idx):
+    def draw_row(row, pos: int):
         color  = CMAP_ACTION(NORM_ACTION(float(row["xt_end"])))
-        is_top = idx in top_idxs
-        lw, ls, s_start, s_end = _action_style_base(row["is_won"], is_top)
-        alpha  = float(alphas[idx_to_pos[idx]])
+        is_top = row.name in top_idxs
+        lw, ls, alpha, s_start, s_end = _action_style(row["is_won"], is_top)
 
-        # ── Linha ──
-        ax.plot([row.x_start, row.x_end], [row.y_start, row.y_end],
+        # Coordenadas deslocadas para esta ação
+        ox0, oy0 = xs0_off[pos], ys0_off[pos]
+        ox1, oy1 = xs1_off[pos], ys1_off[pos]
+
+        # ── Linha reta paralela deslocada ──
+        ax.plot([ox0, ox1], [oy0, oy1],
                 color=color, linestyle=ls, linewidth=lw,
                 alpha=alpha, zorder=3, solid_capstyle="round")
 
-        # ── Origem: anel vazio ○ ──
-        pitch.scatter(row.x_start, row.y_start,
+        # ── Origem: anel vazio na posição deslocada ──
+        pitch.scatter(ox0, oy0,
                       s=s_start, marker="o",
                       facecolors="none",
                       edgecolors=color,
                       linewidths=1.2 if is_top else 0.9,
                       ax=ax, zorder=5, alpha=alpha)
 
-        # ── Destino: diamante preenchido ◆ ──
-        pitch.scatter(row.x_end, row.y_end,
+        # ── Destino: diamante preenchido na posição deslocada ──
+        pitch.scatter(ox1, oy1,
                       s=s_end, marker="D",
                       facecolors=color,
                       edgecolors="white",
                       linewidths=0.7 if is_top else 0.4,
                       ax=ax, zorder=6, alpha=alpha)
 
-        # Indicador de vídeo
+        # Indicador de vídeo (ring dourado sobre origem real)
         if has_video_value(row["video"]):
-            pitch.scatter(row.x_start, row.y_start,
-                          s=s_start+40, marker="o", facecolors="none",
+            pitch.scatter(ox0, oy0,
+                          s=s_start + 40, marker="o", facecolors="none",
                           edgecolors="#FFD54F", linewidths=1.8,
                           ax=ax, zorder=7, alpha=alpha)
 
     # Não-top primeiro, top por cima
-    for idx, row in df.iterrows():
+    for pos, (idx, row) in enumerate(df.iterrows()):
         if idx not in top_idxs:
-            draw_row(row, idx)
-    for idx, row in df.iterrows():
+            draw_row(row, pos)
+    for pos, (idx, row) in enumerate(df.iterrows()):
         if idx in top_idxs:
-            draw_row(row, idx)
+            draw_row(row, pos)
 
     ax.set_title(title, fontsize=12, color="#ffffff", pad=8)
 
     # Legenda compacta
     legend_items = [
-        ax.scatter([],[], s=18, marker="o", facecolors="none",
+        ax.scatter([], [], s=18, marker="o", facecolors="none",
                    edgecolors="#fd8d3c", linewidths=1.2, label="Origin"),
-        ax.scatter([],[], s=45, marker="D", facecolors="#fd8d3c",
-                   edgecolors="white",    linewidths=0.7, label="Destination"),
-        ax.plot([],[],  color="#fd8d3c", linestyle="--", lw=2.0,
+        ax.scatter([], [], s=45, marker="D", facecolors="#fd8d3c",
+                   edgecolors="white", linewidths=0.7, label="Destination"),
+        ax.plot([], [], color="#fd8d3c", linestyle="--", lw=2.0,
                 label=f"Top {top_n_highlight}")[0],
-        ax.plot([],[],  color="#aaaaaa", linestyle=":", lw=1.0,
+        ax.plot([], [], color="#aaaaaa", linestyle=":", lw=1.0,
                 label="Failed")[0],
     ]
     legend = ax.legend(handles=legend_items, loc="upper left",
-                       bbox_to_anchor=(0.01,0.99),
+                       bbox_to_anchor=(0.01, 0.99),
                        frameon=True, facecolor="#1a1a2e", edgecolor="#444466",
                        fontsize="xx-small", labelspacing=0.35, borderpad=0.5,
                        handletextpad=0.4)
     for t in legend.get_texts(): t.set_color("white")
     legend.get_frame().set_alpha(0.90)
 
+    # Colorbar
     sm   = plt.cm.ScalarMappable(cmap=CMAP_ACTION, norm=NORM_ACTION)
     cbar = fig.colorbar(sm, ax=ax, fraction=0.025, pad=0.01, shrink=0.72)
     cbar.set_label("xT end", color="#cccccc", fontsize=7, labelpad=3)
     cbar.ax.yaxis.set_tick_params(color="#cccccc", labelsize=6)
-    plt.setp(plt.getp(cbar.ax.axes,"yticklabels"), color="#cccccc")
+    plt.setp(plt.getp(cbar.ax.axes, "yticklabels"), color="#cccccc")
 
     fig.patches.append(FancyArrowPatch(
-        (0.44,0.04),(0.54,0.04), transform=fig.transFigure,
+        (0.44, 0.04), (0.54, 0.04), transform=fig.transFigure,
         arrowstyle="-|>", mutation_scale=13, linewidth=1.8, color="#cccccc"))
-    fig.text(0.49,0.015,"Attack Direction",
-             ha="center",va="center",fontsize=8,color="#cccccc")
+    fig.text(0.49, 0.015, "Attack Direction",
+             ha="center", va="center", fontsize=8, color="#cccccc")
 
     fig.tight_layout(); fig.canvas.draw()
     buf = BytesIO()
@@ -614,12 +618,12 @@ def draw_corridor_heatmap(df, title="Zone Heatmap — Completed Actions"):
                  "center":(LANE_RIGHT_MAX, LANE_LEFT_MIN),
                  "right": (0.0, LANE_RIGHT_MAX)}
     counts = {}
-    for cname,(y0,y1) in corridors.items():
+    for cname, (y0, y1) in corridors.items():
         arr = np.zeros(6, dtype=int)
         for i in range(6):
-            x0,x1 = x_bins[i],x_bins[i+1]
-            arr[i] = int(((df_s.x_end>=x0)&(df_s.x_end<x1)&
-                          (df_s.y_end>=y0)&(df_s.y_end<y1)).sum())
+            x0, x1 = x_bins[i], x_bins[i+1]
+            arr[i] = int(((df_s.x_end >= x0) & (df_s.x_end < x1) &
+                          (df_s.y_end >= y0) & (df_s.y_end < y1)).sum())
         counts[cname] = arr
 
     vmax  = max(1, int(np.concatenate(list(counts.values())).max()))
@@ -629,27 +633,29 @@ def draw_corridor_heatmap(df, title="Zone Heatmap — Completed Actions"):
     fig.set_facecolor("#1a1a2e"); fig.set_dpi(FIG_DPI)
 
     cmap_h = LinearSegmentedColormap.from_list(
-        "wr",["#ffffff","#ffecec","#ffbfbf","#ff8080","#ff3b3b","#ff0000"])
-    norm_h = Normalize(vmin=0, vmax=vmax); thr = max(1, vmax*0.35)
+        "wr", ["#ffffff","#ffecec","#ffbfbf","#ff8080","#ff3b3b","#ff0000"])
+    norm_h = Normalize(vmin=0, vmax=vmax)
+    thr    = max(1, vmax * 0.35)
 
-    for cname,(y0,y1) in corridors.items():
-        for i,val in enumerate(counts[cname]):
-            x0,x1 = x_bins[i],x_bins[i+1]
-            ax.add_patch(Rectangle((x0,y0),x1-x0,y1-y0,
+    for cname, (y0, y1) in corridors.items():
+        for i, val in enumerate(counts[cname]):
+            x0, x1 = x_bins[i], x_bins[i+1]
+            ax.add_patch(Rectangle((x0, y0), x1-x0, y1-y0,
                          facecolor=cmap_h(norm_h(val)),
-                         edgecolor=(1,1,1,0.12),lw=0.6,alpha=0.95,zorder=2))
-            ax.text((x0+x1)/2,(y0+y1)/2,str(val),
-                    ha="center",va="center",zorder=4,fontsize=11,
-                    color="#000000" if val<=thr else "#ffffff",
-                    fontweight="700" if val>=vmax*0.5 else "600")
+                         edgecolor=(1,1,1,0.12), lw=0.6, alpha=0.95, zorder=2))
+            ax.text((x0+x1)/2, (y0+y1)/2, str(val),
+                    ha="center", va="center", zorder=4, fontsize=11,
+                    color="#000000" if val <= thr else "#ffffff",
+                    fontweight="700" if val >= vmax*0.5 else "600")
 
     ax.set_title(title, fontsize=12, color="#ffffff", pad=8)
-    ax.axhline(y=LANE_LEFT_MIN,  color="#ffffff",lw=0.5,alpha=0.15,linestyle="--",zorder=3)
-    ax.axhline(y=LANE_RIGHT_MAX, color="#ffffff",lw=0.5,alpha=0.15,linestyle="--",zorder=3)
+    ax.axhline(y=LANE_LEFT_MIN,  color="#ffffff", lw=0.5, alpha=0.15, linestyle="--", zorder=3)
+    ax.axhline(y=LANE_RIGHT_MAX, color="#ffffff", lw=0.5, alpha=0.15, linestyle="--", zorder=3)
     fig.patches.append(FancyArrowPatch(
-        (0.44,0.04),(0.54,0.04), transform=fig.transFigure,
+        (0.44, 0.04), (0.54, 0.04), transform=fig.transFigure,
         arrowstyle="-|>", mutation_scale=13, linewidth=1.8, color="#cccccc"))
-    fig.text(0.49,0.015,"Attack Direction",ha="center",va="center",fontsize=8,color="#cccccc")
+    fig.text(0.49, 0.015, "Attack Direction",
+             ha="center", va="center", fontsize=8, color="#cccccc")
     fig.tight_layout(); fig.canvas.draw()
     buf = BytesIO()
     fig.savefig(buf, format="png", dpi=FIG_DPI, facecolor=fig.get_facecolor())
@@ -661,7 +667,7 @@ def draw_corridor_heatmap(df, title="Zone Heatmap — Completed Actions"):
 # Top-10 mini table
 # ==========================
 def render_top10(df):
-    df_s = df[(df["outcome"]=="successful") & (df["delta_xt_adj"]>0)]
+    df_s = df[(df["outcome"] == "successful") & (df["delta_xt_adj"] > 0)]
     if df_s.empty:
         st.caption("No successful actions with positive ΔxT.")
         return
@@ -731,27 +737,19 @@ with col_filters:
 
     st.markdown('<hr class="filter-divider">', unsafe_allow_html=True)
 
-    # ── Controles de densidade ──
-    st.markdown("### 🌫️ Adaptive Transparency")
-    st.caption(
-        "Ações em regiões densas ficam mais transparentes. "
-        "Top-N é sempre opaco."
+    # ── Controle do offset paralelo ──
+    st.markdown("### ↔️ Parallel Offset")
+    offset_step = st.slider(
+        "Offset step (m)",
+        min_value=0.0, max_value=6.0, value=1.5, step=0.25,
+        help=(
+            "Distância perpendicular (metros de campo) entre linhas "
+            "paralelas do mesmo grupo.\n\n"
+            "0 = sem deslocamento (linhas sobrepostas).\n"
+            "Valores maiores afastam mais as linhas, "
+            "reduzindo sobreposição a custo de imprecisão posicional."
+        ),
     )
-    alpha_min_ui = st.slider(
-        "Alpha mínimo (regiões densas)",
-        min_value=0.02, max_value=0.50, value=ALPHA_MIN_DEFAULT,
-        step=0.02,
-        help="Alpha aplicado às ações com maior sobreposição (zonas mais congestionadas).",
-    )
-    alpha_max_ui = st.slider(
-        "Alpha máximo (ações isoladas)",
-        min_value=0.30, max_value=1.00, value=ALPHA_MAX_DEFAULT,
-        step=0.02,
-        help="Alpha aplicado às ações em regiões pouco populadas do campo.",
-    )
-    # Garante que min < max
-    if alpha_min_ui >= alpha_max_ui:
-        alpha_max_ui = min(1.0, alpha_min_ui + 0.10)
 
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -775,14 +773,14 @@ with col_field:
     if action_filter == "All Actions":
         df_base = df_base.reset_index(drop=True)
     elif action_filter == "Top N Actions (ΔxT)":
-        df_s    = df_base[df_base["outcome"]=="successful"]
+        df_s    = df_base[df_base["outcome"] == "successful"]
         df_base = df_s.sort_values("delta_xt_adj", ascending=False).head(int(top_n)).reset_index(drop=True)
     elif action_filter == "Unsuccessful Actions":
-        df_base = df_base[df_base["outcome"]=="failed"].reset_index(drop=True)
+        df_base = df_base[df_base["outcome"] == "failed"].reset_index(drop=True)
     elif action_filter == "Successful Actions":
-        df_base = df_base[df_base["outcome"]=="successful"].reset_index(drop=True)
+        df_base = df_base[df_base["outcome"] == "successful"].reset_index(drop=True)
     elif action_filter == "Positive xT only":
-        df_base = df_base[(df_base["outcome"]=="successful") & (df_base["delta_xt"]>0)].reset_index(drop=True)
+        df_base = df_base[(df_base["outcome"] == "successful") & (df_base["delta_xt"] > 0)].reset_index(drop=True)
 
     DISPLAY_WIDTH        = 780
     pass_map_placeholder = st.empty()
@@ -795,18 +793,19 @@ with col_field:
 
     if heat_click is not None:
         rw, rh  = heat_img.size
-        px = heat_click["x"]*(rw/heat_click["width"])
-        py = heat_click["y"]*(rh/heat_click["height"])
-        fx, fy  = hax.transData.inverted().transform((px, rh-py))
+        px = heat_click["x"] * (rw / heat_click["width"])
+        py = heat_click["y"] * (rh / heat_click["height"])
+        fx, fy  = hax.transData.inverted().transform((px, rh - py))
         xb      = np.linspace(0, FIELD_X, 7)
-        ix      = max(0, min(5, np.searchsorted(xb, fx, side="right")-1))
-        x0,x1   = xb[ix], xb[ix+1]
-        if   fy >= LANE_LEFT_MIN:  cn,y0,y1 = "left",   LANE_LEFT_MIN,  FIELD_Y
-        elif fy <  LANE_RIGHT_MAX: cn,y0,y1 = "right",  0.0,            LANE_RIGHT_MAX
-        else:                      cn,y0,y1 = "center", LANE_RIGHT_MAX, LANE_LEFT_MIN
+        ix      = max(0, min(5, np.searchsorted(xb, fx, side="right") - 1))
+        x0, x1  = xb[ix], xb[ix+1]
+        if   fy >= LANE_LEFT_MIN:  cn, y0, y1 = "left",   LANE_LEFT_MIN,  FIELD_Y
+        elif fy <  LANE_RIGHT_MAX: cn, y0, y1 = "right",  0.0,            LANE_RIGHT_MAX
+        else:                      cn, y0, y1 = "center", LANE_RIGHT_MAX, LANE_LEFT_MIN
         st.session_state["heat_selection"] = {
-            "ix":int(ix),"corridor":cn,
-            "x0":float(x0),"x1":float(x1),"y0":float(y0),"y1":float(y1)}
+            "ix": int(ix), "corridor": cn,
+            "x0": float(x0), "x1": float(x1),
+            "y0": float(y0), "y1": float(y1)}
     plt.close(hfig)
 
     # ── Action Map + Top 10 ──
@@ -815,8 +814,8 @@ with col_field:
         if st.session_state["heat_selection"] is not None:
             sel = st.session_state["heat_selection"]
             df_to_draw = df_base[
-                (df_base.x_end>=sel["x0"])&(df_base.x_end<sel["x1"])&
-                (df_base.y_end>=sel["y0"])&(df_base.y_end<sel["y1"])
+                (df_base.x_end >= sel["x0"]) & (df_base.x_end < sel["x1"]) &
+                (df_base.y_end >= sel["y0"]) & (df_base.y_end < sel["y1"])
             ].reset_index(drop=True)
 
         st.markdown(
@@ -833,28 +832,29 @@ with col_field:
             df_to_draw,
             title=f"Action Map — {selected_match}",
             top_n_highlight=int(top_n),
-            alpha_min=float(alpha_min_ui),   # ← sliders
-            alpha_max=float(alpha_max_ui),
+            offset_step=float(offset_step),
         )
         click = streamlit_image_coordinates(img_obj, width=DISPLAY_WIDTH)
 
     selected_action = None
     if click is not None:
         rw, rh  = img_obj.size
-        px = click["x"]*(rw/click["width"])
-        py = click["y"]*(rh/click["height"])
-        fx, fy  = ax.transData.inverted().transform((px, rh-py))
+        px = click["x"] * (rw / click["width"])
+        py = click["y"] * (rh / click["height"])
+        fx, fy  = ax.transData.inverted().transform((px, rh - py))
         df_sel  = df_to_draw.copy()
-        df_sel["dist"] = np.sqrt((df_sel.x_start-fx)**2+(df_sel.y_start-fy)**2)
-        cands = df_sel[df_sel["dist"]<5.0]
+        # Clique é comparado com as coordenadas ORIGINAIS (não deslocadas)
+        # para manter o clique intuitivo
+        df_sel["dist"] = np.sqrt((df_sel.x_start - fx)**2 + (df_sel.y_start - fy)**2)
+        cands = df_sel[df_sel["dist"] < 5.0]
         if not cands.empty:
             selected_action = cands.sort_values("dist").iloc[0]
     plt.close(fig)
 
     if st.session_state["heat_selection"] is not None:
         sel  = st.session_state["heat_selection"]
-        smsk = ((df_base.x_end>=sel["x0"])&(df_base.x_end<sel["x1"])&
-                (df_base.y_end>=sel["y0"])&(df_base.y_end<sel["y1"]))
+        smsk = ((df_base.x_end >= sel["x0"]) & (df_base.x_end < sel["x1"]) &
+                (df_base.y_end >= sel["y0"]) & (df_base.y_end < sel["y1"]))
         st.markdown(
             f"<div style='color:#ffffff;margin-top:4px;'>"
             f"<strong>Filtro:</strong> corredor <code>{sel['corridor']}</code>, "
@@ -877,12 +877,12 @@ with col_field:
             f'— {selected_action["type"]}</strong></div>',
             unsafe_allow_html=True)
 
-        c1,c2 = st.columns(2)
+        c1, c2 = st.columns(2)
         c1.write(f"**Start:** ({selected_action.x_start:.2f}, {selected_action.y_start:.2f})")
         c2.write(f"**End:**   ({selected_action.x_end:.2f},   {selected_action.y_end:.2f})")
 
-        dir_emoji = {"forward":"⬆️","backward":"⬇️","lateral":"↔️"}
-        t1,t2,t3 = st.columns(3)
+        dir_emoji = {"forward": "⬆️", "backward": "⬇️", "lateral": "↔️"}
+        t1, t2, t3 = st.columns(3)
         t1.write(f"**Direction:** {dir_emoji.get(selected_action['direction'],'')} "
                  f"{selected_action['direction'].capitalize()}")
         t2.write(f"**Successful:** {'✅' if selected_action['is_won'] else '❌'}")
@@ -899,7 +899,7 @@ with col_field:
                   if selected_action["delta_xt_adj"] != 0 else None)
 
         if has_video_value(selected_action["video"]):
-            try: st.video(selected_action["video"])
+            try:    st.video(selected_action["video"])
             except Exception: st.error(f"Video not found: {selected_action['video']}")
         else:
             st.warning("No video attached to this event.")
@@ -926,13 +926,13 @@ with col_stats:
 
     with st.expander("General Statistics", expanded=False):
         st.markdown('<div class="stats-section-title">Overview</div>', unsafe_allow_html=True)
-        r1,r2,r3 = st.columns(3)
+        r1, r2, r3 = st.columns(3)
         with r1: small_metric("Total Actions", f"{stats['total_actions']}")
         with r2: small_metric("Successful",    f"{stats['successful_actions']}")
         with r3: small_metric("Accuracy",      f"{stats['accuracy_pct']:.1f}%")
         st.markdown("<hr style='margin:6px 0 8px 0;'>", unsafe_allow_html=True)
         st.markdown('<div class="stats-section-title">Directions</div>', unsafe_allow_html=True)
-        d1,d2,d3 = st.columns(3)
+        d1, d2, d3 = st.columns(3)
         with d1: small_metric("⬆️ Forward",  f"{stats['forward_total']}")
         with d2: small_metric("⬇️ Backward", f"{stats['backward_total']}")
         with d3: small_metric("↔️ Lateral",  f"{stats['lateral_total']}")
@@ -940,7 +940,7 @@ with col_stats:
     with st.expander("xT Statistics", expanded=True):
         st.markdown('<div class="stats-section-title">All successful actions</div>',
                     unsafe_allow_html=True)
-        a1,a2,a3 = st.columns(3)
+        a1, a2, a3 = st.columns(3)
         with a1: small_metric("Σ ΔxT",    f"{stats['pos_sum']:.4f}")
         with a2: small_metric("Mean ΔxT", f"{stats['pos_mean']:.4f}")
         with a3: small_metric("% ΔxT > 0",f"{stats['pos_pct']:.1f}%")
@@ -948,20 +948,20 @@ with col_stats:
         st.markdown("<hr style='margin:6px 0 8px 0;'>", unsafe_allow_html=True)
         st.markdown('<div class="stats-section-title">Top 10 actions</div>',
                     unsafe_allow_html=True)
-        b1,b2 = st.columns(2)
+        b1, b2 = st.columns(2)
         with b1: small_metric("Σ ΔxT Top 10",   f"{stats['top10_sum']:.4f}")
         with b2: small_metric("Mean ΔxT Top 10", f"{stats['top10_mean']:.4f}")
 
         st.markdown("<hr style='margin:6px 0 8px 0;'>", unsafe_allow_html=True)
         st.markdown('<div class="stats-section-title">xT End (successful actions ◆)</div>',
                     unsafe_allow_html=True)
-        c1,c2 = st.columns(2)
+        c1, c2 = st.columns(2)
         with c1: small_metric("Σ xT End",   f"{stats['xt_end_sum']:.4f}")
         with c2: small_metric("Mean xT End", f"{stats['xt_end_mean']:.4f}")
 
     with st.expander("Failed Actions", expanded=False):
         st.markdown('<div class="stats-section-title">xT contrários</div>', unsafe_allow_html=True)
-        fx1,fx2,fx3 = st.columns(3)
+        fx1, fx2, fx3 = st.columns(3)
         with fx1: small_metric("Failed",              f"{stats['failed_count']}")
         with fx2: small_metric("Σ xT start — failed", f"{stats['failed_xt_sum']:.4f}")
         with fx3: small_metric("Mean xT — failed",    f"{stats['failed_xt_mean']:.4f}")
@@ -970,4 +970,4 @@ with col_stats:
     st.caption(
         "○ = origem  ◆ = destino  |  Cor = xT End (amarelo → vermelho escuro)  |  "
         "ΔxT adj = ΔxT × (1 + bônus log-distância)  |  "
-        "Transparência = inverso da densidade KDE (Gauss, Scott bw).")
+        "Linhas paralelas = offset perpendicular por grupo de proximidade.")
