@@ -1096,27 +1096,170 @@ def build_match_metrics(dfs_by_match):
 
 
 
+def render_direction_cards(stats):
+
+    cards = [
+
+        ('Forward', '&rarr;', int(stats['forward_total']), '#34d399'),
+
+        ('Backward', '&larr;', int(stats['backward_total']), '#f97316'),
+
+        ('Lateral', '&harr;', int(stats['lateral_total']), '#60a5fa'),
+
+    ]
+
+    html = '<div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;">'
+
+    for label, arrow, value, color in cards:
+
+        html += (
+
+            '<div style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);'
+
+            'border-radius:10px;padding:8px 9px;">'
+
+            f'<div style="display:flex;align-items:center;justify-content:space-between;'
+
+            f'font-size:11px;color:#cbd5e1;"><span>{label}</span><span style="color:{color};font-size:14px;">{arrow}</span></div>'
+
+            f'<div style="font-size:18px;font-weight:700;color:#ffffff;line-height:1.1;">{value}</div>'
+
+            '</div>'
+
+        )
+
+    html += '</div>'
+
+    st.markdown(html, unsafe_allow_html=True)
+
+
 def plot_metric_line(metrics_df, key, label):
 
-    fig, ax = plt.subplots(figsize=(10, 4), dpi=120)
+    if metrics_df.empty:
 
-    ax.plot(metrics_df['match'], metrics_df[key], marker='o', linewidth=2)
+        st.info('Sem dados para exibir o grafico.')
 
-    for x, y in zip(metrics_df['match'], metrics_df[key]):
+        return
 
-        ax.text(x, y, f' {y:.3f}', fontsize=8, va='bottom')
 
-    ax.set_title(f'Evolucao por partida - {label}')
+    y = metrics_df[key].astype(float).to_numpy()
 
-    ax.set_xlabel('Partida')
+    x = np.arange(len(y), dtype=float)
 
-    ax.set_ylabel(label)
+    labels = metrics_df['match'].tolist()
 
-    ax.grid(alpha=0.25)
 
-    ax.tick_params(axis='x', rotation=25)
+    if len(x) > 1:
 
-    fig.tight_layout()
+        x_dense = np.linspace(x.min(), x.max(), max(260, len(x) * 40))
+
+        y_dense = np.interp(x_dense, x, y)
+
+        if len(x) > 2:
+
+            kernel = np.array([1, 2, 3, 2, 1], dtype=float)
+
+            kernel /= kernel.sum()
+
+            y_dense = np.convolve(y_dense, kernel, mode='same')
+
+    else:
+
+        x_dense, y_dense = x, y
+
+
+    base = min(0.0, float(y.min()))
+
+
+    fig, ax = plt.subplots(figsize=(11.8, 4.9), dpi=140)
+
+    fig.patch.set_facecolor('#0b1220')
+
+    ax.set_facecolor('#101827')
+
+
+    ax.fill_between(x_dense, y_dense, base, color='#0ea5e9', alpha=0.18, zorder=1)
+
+    ax.plot(x_dense, y_dense, color='#7dd3fc', linewidth=9, alpha=0.08, solid_capstyle='round', zorder=2)
+
+    ax.plot(x_dense, y_dense, color='#38bdf8', linewidth=3.2, solid_capstyle='round', zorder=3)
+
+    ax.scatter(x, y, s=62, color='#22d3ee', edgecolors='white', linewidths=1.0, zorder=4)
+
+
+    y_avg = float(np.mean(y))
+
+    ax.axhline(y_avg, color='#fbbf24', linestyle=(0, (4, 4)), linewidth=1.2, alpha=0.75, zorder=2)
+
+    ax.text(
+
+        x.max() + 0.03,
+
+        y_avg,
+
+        f' media: {y_avg:.2f}',
+
+        color='#fcd34d',
+
+        fontsize=8,
+
+        va='center',
+
+        ha='left',
+
+        bbox=dict(boxstyle='round,pad=0.2', fc='#1f2937', ec='none', alpha=0.8),
+
+    )
+
+
+    for xi, yi in zip(x, y):
+
+        ax.text(
+
+            xi,
+
+            yi,
+
+            f'{yi:.2f}',
+
+            color='#e2e8f0',
+
+            fontsize=8,
+
+            ha='center',
+
+            va='bottom',
+
+            bbox=dict(boxstyle='round,pad=0.18', fc='#0f172a', ec='none', alpha=0.72),
+
+            zorder=5,
+
+        )
+
+
+    for spine in ax.spines.values():
+
+        spine.set_visible(False)
+
+
+    ax.set_xticks(x)
+
+    ax.set_xticklabels(labels, rotation=18, ha='right', color='#cbd5e1', fontsize=9)
+
+    ax.tick_params(axis='y', colors='#cbd5e1', labelsize=9)
+
+    ax.set_ylabel(label, color='#bfdbfe', fontsize=10)
+
+    ax.set_title(f'Evolucao por partida - {label}', loc='left', color='#f8fafc', fontsize=14, fontweight='700', pad=12)
+
+    ax.grid(axis='y', color='#94a3b8', alpha=0.24, linestyle='--', linewidth=0.8)
+
+    ax.grid(axis='x', color='#94a3b8', alpha=0.12, linestyle=':', linewidth=0.6)
+
+    ax.margins(x=0.03)
+
+    fig.tight_layout(pad=1.4)
+
 
     st.pyplot(fig, use_container_width=True)
 
@@ -1182,14 +1325,6 @@ with tab_mapas:
 
         top_n = st.number_input('Top N', min_value=1, max_value=100, value=20, step=1)
 
-        st.markdown('<hr class="filter-divider">', unsafe_allow_html=True)
-
-
-
-        st.markdown('### Parallel Offset')
-
-        offset_step = st.slider('Offset step (m)', min_value=0.0, max_value=6.0, value=1.5, step=0.25)
-
         st.markdown('</div>', unsafe_allow_html=True)
 
 
@@ -1240,7 +1375,57 @@ with tab_mapas:
 
 
 
-        st.markdown('<h4 style="color:#ffffff;margin:6px 0 4px 0;">Zone Heatmap</h4>', unsafe_allow_html=True)
+        if st.button('Limpar filtro do quadrante', key='clear_heat_filter'):
+
+            st.session_state['heat_selection'] = None
+
+
+
+        df_to_draw = df_base
+
+        if st.session_state['heat_selection'] is not None:
+
+            sel = st.session_state['heat_selection']
+
+            df_to_draw = df_base[(df_base.x_end >= sel['x0']) & (df_base.x_end < sel['x1']) & (df_base.y_end >= sel['y0']) & (df_base.y_end < sel['y1'])].reset_index(drop=True)
+
+
+
+        st.markdown('<h4 style="color:#ffffff;margin:4px 0 3px 0;">Action Map</h4>', unsafe_allow_html=True)
+
+        img_obj, ax, fig = draw_action_map(df_to_draw, title=f'Action Map - {selected_match}', top_n_highlight=int(top_n), offset_step=1.5)
+
+        click = streamlit_image_coordinates(img_obj, width=DISPLAY_WIDTH)
+
+
+
+        if click is not None:
+
+            rw, rh = img_obj.size
+
+            px = click['x'] * (rw / click['width'])
+
+            py = click['y'] * (rh / click['height'])
+
+            fx, fy = ax.transData.inverted().transform((px, rh - py))
+
+            df_sel = df_to_draw.copy()
+
+            df_sel['dist'] = np.sqrt((df_sel.x_start - fx)**2 + (df_sel.y_start - fy)**2)
+
+            cands = df_sel[df_sel['dist'] < 5.0]
+
+            if not cands.empty:
+
+                st.session_state['selected_action'] = cands.sort_values('dist').iloc[0]
+
+
+
+        plt.close(fig)
+
+
+
+        st.markdown('<h4 style="color:#ffffff;margin:8px 0 4px 0;">Zone Heatmap</h4>', unsafe_allow_html=True)
 
         heat_img, hax, hfig = draw_corridor_heatmap(df_base)
 
@@ -1281,58 +1466,6 @@ with tab_mapas:
 
 
         plt.close(hfig)
-
-
-
-        df_to_draw = df_base
-
-        if st.session_state['heat_selection'] is not None:
-
-            sel = st.session_state['heat_selection']
-
-            df_to_draw = df_base[(df_base.x_end >= sel['x0']) & (df_base.x_end < sel['x1']) & (df_base.y_end >= sel['y0']) & (df_base.y_end < sel['y1'])].reset_index(drop=True)
-
-
-
-        render_top10(df_to_draw, title='Top 10 - delta xT adj e xT End')
-
-        st.markdown('<h4 style="color:#ffffff;margin:4px 0 3px 0;">Action Map</h4>', unsafe_allow_html=True)
-
-        if st.button('Limpar filtro do quadrante', key='clear_heat_filter'):
-
-            st.session_state['heat_selection'] = None
-
-
-
-        img_obj, ax, fig = draw_action_map(df_to_draw, title=f'Action Map - {selected_match}', top_n_highlight=int(top_n), offset_step=float(offset_step))
-
-        click = streamlit_image_coordinates(img_obj, width=DISPLAY_WIDTH)
-
-
-
-        if click is not None:
-
-            rw, rh = img_obj.size
-
-            px = click['x'] * (rw / click['width'])
-
-            py = click['y'] * (rh / click['height'])
-
-            fx, fy = ax.transData.inverted().transform((px, rh - py))
-
-            df_sel = df_to_draw.copy()
-
-            df_sel['dist'] = np.sqrt((df_sel.x_start - fx)**2 + (df_sel.y_start - fy)**2)
-
-            cands = df_sel[df_sel['dist'] < 5.0]
-
-            if not cands.empty:
-
-                st.session_state['selected_action'] = cands.sort_values('dist').iloc[0]
-
-
-
-        plt.close(fig)
 
 
 
@@ -1438,11 +1571,17 @@ with tab_stats:
 
 
 
-    col_gen, col_adv = st.columns([1, 1.2], gap='large')
+    col_left, col_right = st.columns([1.02, 1.25], gap='large')
 
 
 
-    with col_gen:
+    with col_left:
+
+        render_top10(stats_df, title='Top 10 deltaT (partida selecionada)')
+
+
+
+    with col_right:
 
         with st.expander('General Statistics', expanded=True):
 
@@ -1460,17 +1599,9 @@ with tab_stats:
 
             st.markdown('<div class="stats-section-title">Directions</div>', unsafe_allow_html=True)
 
-            d1, d2, d3 = st.columns(3)
-
-            with d1: small_metric('Forward', f"{stats['forward_total']}")
-
-            with d2: small_metric('Backward', f"{stats['backward_total']}")
-
-            with d3: small_metric('Lateral', f"{stats['lateral_total']}")
+            render_direction_cards(stats)
 
 
-
-    with col_adv:
 
         with st.expander('Advanced Statistics', expanded=True):
 
@@ -1478,11 +1609,11 @@ with tab_stats:
 
             a1, a2, a3 = st.columns(3)
 
-            with a1: small_metric('Soma delta xT', f"{stats['sum_delta_xt']:.4f}")
+            with a1: small_metric('Soma delta xT', f"{stats['sum_delta_xt']:.2f}")
 
-            with a2: small_metric('Perc positivos', f"{stats['pos_pct']:.1f}%")
+            with a2: small_metric('Perc positivos', f"{stats['pos_pct']:.2f}%")
 
-            with a3: small_metric('Media positivos', f"{stats['pos_mean']:.4f}")
+            with a3: small_metric('Media positivos', f"{stats['pos_mean']:.2f}")
 
 
 
@@ -1492,25 +1623,21 @@ with tab_stats:
 
             b1, b2, b3, b4 = st.columns(4)
 
-            with b1: small_metric('Soma Top10', f"{stats['top10_sum']:.4f}")
+            with b1: small_metric('Soma Top10', f"{stats['top10_sum']:.2f}")
 
-            with b2: small_metric('Media Top10', f"{stats['top10_mean']:.4f}")
+            with b2: small_metric('Media Top10', f"{stats['top10_mean']:.2f}")
 
-            with b3: small_metric('Soma End xT', f"{stats['xt_end_sum']:.4f}")
+            with b3: small_metric('Soma End xT', f"{stats['xt_end_sum']:.2f}")
 
-            with b4: small_metric('Media End xT', f"{stats['xt_end_mean']:.4f}")
+            with b4: small_metric('Media End xT', f"{stats['xt_end_mean']:.2f}")
 
 
 
             c1, c2 = st.columns(2)
 
-            with c1: small_metric('Soma xT start failed', f"{stats['failed_xt_sum']:.4f}")
+            with c1: small_metric('Soma xT start failed', f"{stats['failed_xt_sum']:.2f}")
 
-            with c2: small_metric('Media xT failed', f"{stats['failed_xt_mean']:.4f}")
-
-
-
-    render_top10(stats_df, title='Top 10 deltaT (partida selecionada)')
+            with c2: small_metric('Media xT failed', f"{stats['failed_xt_mean']:.2f}")
 
 
 
@@ -1549,3 +1676,4 @@ with tab_stats:
 
 
     st.caption('Mapeamento: origem (anel), destino (diamante), cor por xT End, e linhas paralelas por grupos de proximidade.')
+
