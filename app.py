@@ -811,8 +811,8 @@ with col_stats:
         st.markdown('<div class="stats-section-title">All successful actions</div>',
                     unsafe_allow_html=True)
         a1,a2,a3 = st.columns(3)
-        with a1: small_metric("Σ ΔxT",          f"{stats['pos_sum']:.4f}")
-        with a2: small_metric("Mean ΔxT",        f"{stats['pos_mean']:.4f}")
+        with a1: small_metric("Σ ΔxT",          f"{stats['pos_sum']:.2f}")
+        with a2: small_metric("Mean ΔxT",        f"{stats['pos_mean']:.2f}")
         with a3: small_metric("% ΔxT > 0",       f"{stats['pos_pct']:.1f}%")
 
         st.markdown("<hr style='margin:6px 0 8px 0;'>", unsafe_allow_html=True)
@@ -821,8 +821,8 @@ with col_stats:
         st.markdown('<div class="stats-section-title">Top 10 actions</div>',
                     unsafe_allow_html=True)
         b1,b2 = st.columns(2)
-        with b1: small_metric("Σ ΔxT Top 10",   f"{stats['top10_sum']:.4f}")
-        with b2: small_metric("Mean ΔxT Top 10", f"{stats['top10_mean']:.4f}")
+        with b1: small_metric("Σ ΔxT Top 10",   f"{stats['top10_sum']:.2f}")
+        with b2: small_metric("Mean ΔxT Top 10", f"{stats['top10_mean']:.2f}")
 
         st.markdown("<hr style='margin:6px 0 8px 0;'>", unsafe_allow_html=True)
 
@@ -830,15 +830,15 @@ with col_stats:
         st.markdown('<div class="stats-section-title">xT End (successful actions ◆)</div>',
                     unsafe_allow_html=True)
         c1,c2 = st.columns(2)
-        with c1: small_metric("Σ xT End",   f"{stats['xt_end_sum']:.4f}")
-        with c2: small_metric("Mean xT End", f"{stats['xt_end_mean']:.4f}")
+        with c1: small_metric("Σ xT End",   f"{stats['xt_end_sum']:.2f}")
+        with c2: small_metric("Mean xT End", f"{stats['xt_end_mean']:.2f}")
 
     with st.expander("Failed Actions", expanded=False):
         st.markdown('<div class="stats-section-title">xT contrários</div>', unsafe_allow_html=True)
         fx1,fx2,fx3 = st.columns(3)
         with fx1: small_metric("Failed",               f"{stats['failed_count']}")
-        with fx2: small_metric("Σ xT start — failed",  f"{stats['failed_xt_sum']:.4f}")
-        with fx3: small_metric("Mean xT — failed",     f"{stats['failed_xt_mean']:.4f}")
+        with fx2: small_metric("Σ xT start — failed",  f"{stats['failed_xt_sum']:.2f}")
+        with fx3: small_metric("Mean xT — failed",     f"{stats['failed_xt_mean']:.2f}")
 
     st.divider()
     st.caption(
