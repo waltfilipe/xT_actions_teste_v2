@@ -986,7 +986,7 @@ def draw_corridor_heatmap(df, title='Zone Heatmap - Completed Actions'):
 
 
 
-def render_top10(df, title='Top 10 - delta xT adj e xT End'):
+def render_top10(df, title='Top 10 - ΔxT (Adj.) and xT End'):
 
     st.markdown(f'<h4 style="color:#ffffff;margin:0 0 6px 0;">{title}</h4>', unsafe_allow_html=True)
 
@@ -994,7 +994,7 @@ def render_top10(df, title='Top 10 - delta xT adj e xT End'):
 
     if df_s.empty:
 
-        st.caption('No successful actions with positive delta xT.')
+        st.caption('No successful actions with positive ΔxT.')
 
         return
 
@@ -1042,7 +1042,7 @@ def render_top10(df, title='Top 10 - delta xT adj e xT End'):
 
           <th style='color:#aaa;padding:5px 8px;text-align:center;font-weight:500;font-size:11px;'>#</th>
 
-          <th style='color:#aaa;padding:5px 8px;text-align:right;font-weight:500;font-size:11px;'>delta xT adj</th>
+          <th style='color:#aaa;padding:5px 8px;text-align:right;font-weight:500;font-size:11px;'>ΔxT (Adj.)</th>
 
           <th style='color:#aaa;padding:5px 8px;text-align:center;font-weight:500;font-size:11px;'>xT End</th>
 
@@ -1137,7 +1137,7 @@ def plot_metric_line(metrics_df, key, label):
 
     if metrics_df.empty:
 
-        st.info('Sem dados para exibir o grafico.')
+        st.info('No data available for this chart.')
 
         return
 
@@ -1171,7 +1171,7 @@ def plot_metric_line(metrics_df, key, label):
     base = min(0.0, float(y.min()))
 
 
-    fig, ax = plt.subplots(figsize=(11.8, 4.9), dpi=140)
+    fig, ax = plt.subplots(figsize=(8.2, 3.6), dpi=220)
 
     fig.patch.set_facecolor('#0b1220')
 
@@ -1197,7 +1197,7 @@ def plot_metric_line(metrics_df, key, label):
 
         y_avg,
 
-        f' media: {y_avg:.2f}',
+        f' avg: {y_avg:.2f}',
 
         color='#fcd34d',
 
@@ -1250,7 +1250,7 @@ def plot_metric_line(metrics_df, key, label):
 
     ax.set_ylabel(label, color='#bfdbfe', fontsize=10)
 
-    ax.set_title(f'Evolucao por partida - {label}', loc='left', color='#f8fafc', fontsize=14, fontweight='700', pad=12)
+    ax.set_title(f'Match-by-Match Trend - {label}', loc='left', color='#f8fafc', fontsize=14, fontweight='700', pad=12)
 
     ax.grid(axis='y', color='#94a3b8', alpha=0.24, linestyle='--', linewidth=0.8)
 
@@ -1261,7 +1261,7 @@ def plot_metric_line(metrics_df, key, label):
     fig.tight_layout(pad=1.4)
 
 
-    st.pyplot(fig, use_container_width=True)
+    st.pyplot(fig, use_container_width=False)
 
     plt.close(fig)
 
@@ -1285,13 +1285,13 @@ for key, default in [
 
 
 
-tab_mapas, tab_stats = st.tabs(['Aba Mapas', 'Aba Stats'])
+tab_maps, tab_stats = st.tabs(['Maps', 'Stats'])
 
 
 
-with tab_mapas:
+with tab_maps:
 
-    col_filters, col_field, col_lances = st.columns([0.95, 2.15, 1.2], gap='large')
+    col_filters, col_field, col_events = st.columns([0.95, 2.15, 1.2], gap='large')
 
 
 
@@ -1313,7 +1313,7 @@ with tab_mapas:
 
             'All Actions',
 
-            'Top N Actions (delta xT)',
+            'Top N Actions (ΔxT)',
 
             'Unsuccessful Actions',
 
@@ -1349,7 +1349,7 @@ with tab_mapas:
 
         df_base = df_base.reset_index(drop=True)
 
-    elif action_filter == 'Top N Actions (delta xT)':
+    elif action_filter == 'Top N Actions (ΔxT)':
 
         df_s = df_base[df_base['outcome'] == 'successful']
 
@@ -1375,7 +1375,7 @@ with tab_mapas:
 
 
 
-        if st.button('Limpar filtro do quadrante', key='clear_heat_filter'):
+        if st.button('Clear zone filter', key='clear_heat_filter'):
 
             st.session_state['heat_selection'] = None
 
@@ -1475,7 +1475,7 @@ with tab_mapas:
 
             smsk = ((df_base.x_end >= sel['x0']) & (df_base.x_end < sel['x1']) & (df_base.y_end >= sel['y0']) & (df_base.y_end < sel['y1']))
 
-            st.markdown(f"<div style='color:#ffffff;margin-top:4px;'><strong>Filtro:</strong> corredor <code>{sel['corridor']}</code>, col X #{sel['ix']+1} - {int(smsk.sum())} acoes</div>", unsafe_allow_html=True)
+            st.markdown(f"<div style='color:#ffffff;margin-top:4px;'><strong>Filter:</strong> corridor <code>{sel['corridor']}</code>, X column #{sel['ix']+1} - {int(smsk.sum())} actions</div>", unsafe_allow_html=True)
 
 
 
@@ -1495,15 +1495,15 @@ with tab_mapas:
 
 
 
-    with col_lances:
+    with col_events:
 
-        st.subheader('Espaco para os lances')
+        st.subheader('Event Panel')
 
         selected_action = st.session_state.get('selected_action', None)
 
         if selected_action is None:
 
-            st.info('Clique no anel de origem no mapa para abrir o lance.')
+            st.info('Click the origin ring on the map to open the event.')
 
         else:
 
@@ -1535,11 +1535,11 @@ with tab_mapas:
 
             st.metric('xT End', f'{selected_action["xt_end"]:.4f}')
 
-            st.metric('delta xT', f'{selected_action["delta_xt"]:.4f}')
+            st.metric('ΔxT', f'{selected_action["delta_xt"]:.4f}')
 
             st.metric('Dist Bonus', f'+{selected_action["dist_bonus"]*100:.1f}%')
 
-            st.metric('delta xT adj', f'{selected_action["delta_xt_adj"]:.4f}')
+            st.metric('ΔxT (Adj.)', f'{selected_action["delta_xt_adj"]:.4f}')
 
             if has_video_value(selected_action['video']):
 
@@ -1577,7 +1577,7 @@ with tab_stats:
 
     with col_left:
 
-        render_top10(stats_df, title='Top 10 deltaT (partida selecionada)')
+        render_top10(stats_df, title='Top 10 ΔxT (Selected Match)')
 
 
 
@@ -1605,15 +1605,15 @@ with tab_stats:
 
         with st.expander('Advanced Statistics', expanded=True):
 
-            st.markdown('<div class="stats-section-title">delta xT</div>', unsafe_allow_html=True)
+            st.markdown('<div class="stats-section-title">ΔxT</div>', unsafe_allow_html=True)
 
             a1, a2, a3 = st.columns(3)
 
-            with a1: small_metric('Soma delta xT', f"{stats['sum_delta_xt']:.2f}")
+            with a1: small_metric('Σ ΔxT', f"{stats['sum_delta_xt']:.2f}")
 
-            with a2: small_metric('Perc positivos', f"{stats['pos_pct']:.2f}%")
+            with a2: small_metric('% Positive', f"{stats['pos_pct']:.2f}%")
 
-            with a3: small_metric('Media positivos', f"{stats['pos_mean']:.2f}")
+            with a3: small_metric('Avg. Positive', f"{stats['pos_mean']:.2f}")
 
 
 
@@ -1623,49 +1623,49 @@ with tab_stats:
 
             b1, b2, b3, b4 = st.columns(4)
 
-            with b1: small_metric('Soma Top10', f"{stats['top10_sum']:.2f}")
+            with b1: small_metric('Σ Top10', f"{stats['top10_sum']:.2f}")
 
-            with b2: small_metric('Media Top10', f"{stats['top10_mean']:.2f}")
+            with b2: small_metric('Avg. Top10', f"{stats['top10_mean']:.2f}")
 
-            with b3: small_metric('Soma End xT', f"{stats['xt_end_sum']:.2f}")
+            with b3: small_metric('Σ End xT', f"{stats['xt_end_sum']:.2f}")
 
-            with b4: small_metric('Media End xT', f"{stats['xt_end_mean']:.2f}")
+            with b4: small_metric('Avg. End xT', f"{stats['xt_end_mean']:.2f}")
 
 
 
             c1, c2 = st.columns(2)
 
-            with c1: small_metric('Soma xT start failed', f"{stats['failed_xt_sum']:.2f}")
+            with c1: small_metric('Σ xT Start (Failed)', f"{stats['failed_xt_sum']:.2f}")
 
-            with c2: small_metric('Media xT failed', f"{stats['failed_xt_mean']:.2f}")
+            with c2: small_metric('Avg. xT (Failed)', f"{stats['failed_xt_mean']:.2f}")
 
 
 
-    st.markdown('<h4 style="color:#ffffff;margin:12px 0 6px 0;">Grafico de linha por partida</h4>', unsafe_allow_html=True)
+    st.markdown('<h4 style="color:#ffffff;margin:12px 0 6px 0;">Match Trend Line Chart</h4>', unsafe_allow_html=True)
 
     metric_options = {
 
-        'Soma de delta xT': ('sum_delta_xt', 'Soma de delta xT'),
+        'Σ ΔxT': ('sum_delta_xt', 'Σ ΔxT'),
 
-        '% de positivos de delta xT': ('pos_pct', '% de positivos de delta xT'),
+        '% Positive ΔxT': ('pos_pct', '% Positive ΔxT'),
 
-        'Soma de top 10 delta xT': ('top10_sum', 'Soma de top 10 delta xT'),
+        'Σ Top 10 ΔxT': ('top10_sum', 'Σ Top 10 ΔxT'),
 
-        'Media de top 10 delta xT': ('top10_mean', 'Media de top 10 delta xT'),
+        'Avg. Top 10 ΔxT': ('top10_mean', 'Avg. Top 10 ΔxT'),
 
-        'Soma de end xT': ('xt_end_sum', 'Soma de end xT'),
+        'Σ End xT': ('xt_end_sum', 'Σ End xT'),
 
-        'Media de end xT': ('xt_end_mean', 'Media de end xT'),
+        'Avg. End xT': ('xt_end_mean', 'Avg. End xT'),
 
-        'Soma de xT start - failed': ('failed_xt_sum', 'Soma de xT start - failed'),
+        'Σ xT Start (Failed)': ('failed_xt_sum', 'Σ xT Start (Failed)'),
 
-        'Media xT - failed': ('failed_xt_mean', 'Media xT - failed'),
+        'Avg. xT (Failed)': ('failed_xt_mean', 'Avg. xT (Failed)'),
 
     }
 
 
 
-    metric_label = st.selectbox('Selecione a estatistica para o grafico', list(metric_options.keys()), index=0)
+    metric_label = st.selectbox('Select a metric for the chart', list(metric_options.keys()), index=0)
 
     metric_key, metric_name = metric_options[metric_label]
 
@@ -1675,5 +1675,4 @@ with tab_stats:
 
 
 
-    st.caption('Mapeamento: origem (anel), destino (diamante), cor por xT End, e linhas paralelas por grupos de proximidade.')
-
+    st.caption('Mapping: origin (ring), destination (diamond), color by xT End, and parallel lines for proximity-based groups.')
