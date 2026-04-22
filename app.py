@@ -12,6 +12,8 @@ import pandas as pd
 
 import numpy as np
 
+import textwrap
+
 from PIL import Image
 
 from io import BytesIO
@@ -1030,31 +1032,19 @@ def render_top10(df, title='Top 10 - ΔxT (Adj.) and xT End'):
 
 
 
-    table_html = f"""
-
-    <table style='width:100%;border-collapse:collapse;background:rgba(255,255,255,.03);border-radius:8px;overflow:hidden;margin-bottom:6px;'>
-
-      <thead>
-
-        <tr style='background:rgba(255,255,255,.06);'>
-
-          <th style='color:#aaa;padding:5px 8px;text-align:center;font-weight:500;font-size:11px;'>Rank</th>
-
-          <th style='color:#aaa;padding:5px 8px;text-align:center;font-weight:500;font-size:11px;'>#</th>
-
-          <th style='color:#aaa;padding:5px 8px;text-align:right;font-weight:500;font-size:11px;'>ΔxT (Adj.)</th>
-
-          <th style='color:#aaa;padding:5px 8px;text-align:center;font-weight:500;font-size:11px;'>xT End</th>
-
-        </tr>
-
-      </thead>
-
-      <tbody>{rows_html}</tbody>
-
-    </table>
-
-    """
+        table_html = textwrap.dedent(f"""
+        <table style='width:100%;border-collapse:collapse;background:rgba(255,255,255,.03);border-radius:8px;overflow:hidden;margin-bottom:6px;'>
+            <thead>
+                <tr style='background:rgba(255,255,255,.06);'>
+                    <th style='color:#aaa;padding:5px 8px;text-align:center;font-weight:500;font-size:11px;'>Rank</th>
+                    <th style='color:#aaa;padding:5px 8px;text-align:center;font-weight:500;font-size:11px;'>#</th>
+                    <th style='color:#aaa;padding:5px 8px;text-align:right;font-weight:500;font-size:11px;'>ΔxT (Adj.)</th>
+                    <th style='color:#aaa;padding:5px 8px;text-align:center;font-weight:500;font-size:11px;'>xT End</th>
+                </tr>
+            </thead>
+            <tbody>{rows_html}</tbody>
+        </table>
+        """)
 
     st.markdown(table_html, unsafe_allow_html=True)
 
