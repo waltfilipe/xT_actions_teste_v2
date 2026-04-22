@@ -1,4 +1,4 @@
-# Action Map — Clean (Actions + xT) — v6
+# Action Map — Clean (Actions + xT) — v7 [Edge Bundling]
 import streamlit as st
 import matplotlib
 matplotlib.use("Agg")
@@ -12,6 +12,7 @@ from matplotlib.patches import FancyArrowPatch, Rectangle
 from streamlit_image_coordinates import streamlit_image_coordinates
 from matplotlib.colors import Normalize, LinearSegmentedColormap
 from matplotlib.path import Path
+from collections import defaultdict
 import math
 
 # ==========================
@@ -62,19 +63,25 @@ LANE_RIGHT_MAX     = 26.67
 NX, NY             = 16, 12
 LATERAL_MIN_DIST   = 12.0
 
-# Action colormap: pale yellow → dark red, driven by xT_end
+# Action colormap
 CMAP_ACTION = LinearSegmentedColormap.from_list(
     "xt_action",
     ["#ffffcc","#ffeda0","#fed976","#feb24c","#fd8d3c","#f03b20","#bd0026","#67000d"])
 NORM_ACTION = Normalize(vmin=0.0, vmax=1.0)
 
-# Distance bonus (fixed, no UI sliders)
 D_REF     = 10.0
 D_SCALE   = 20.0
 BONUS_CAP = 0.60
 
 FIG_W, FIG_H = 7.9, 5.3
 FIG_DPI      = 110
+
+# ==========================
+# Edge Bundling Constants
+# ==========================
+BUNDLE_GRID_X  = 8    # colunas para bucketing de origem/destino
+BUNDLE_GRID_Y  = 6    # linhas para bucketing
+BEZIER_SAMPLES = 60   # pontos amostrados na curva (suavidade)
 
 # ==========================
 # Distance bonus
@@ -84,7 +91,7 @@ def distance_bonus(distance):
     return np.minimum(BONUS_CAP, np.log1p(excess / D_SCALE))
 
 # ==========================
-# xT Grid — C + D + Base Angle Correction
+# xT Grid
 # ==========================
 @st.cache_data(show_spinner=False)
 def compute_xt_grid(NX=16, NY=12, sub=24,
@@ -360,14 +367,12 @@ def compute_stats(df):
     pos_mean  = float(df.loc[pos_mask,"delta_xt_adj"].mean()) if pos_count else 0.0
     pos_pct   = (pos_count/total*100) if total else 0.0
 
-    # Top-10 subset stats
     top10_df  = (df.loc[pos_mask]
                    .sort_values("delta_xt_adj", ascending=False)
                    .head(10)) if pos_count else pd.DataFrame()
     top10_sum  = float(top10_df["delta_xt_adj"].sum())  if not top10_df.empty else 0.0
     top10_mean = float(top10_df["delta_xt_adj"].mean()) if not top10_df.empty else 0.0
 
-    # xT End of successful actions
     succ_mask   = df["outcome"] == "successful"
     xt_end_mean = float(df.loc[succ_mask,"xt_end"].mean()) if succ_mask.any() else 0.0
     xt_end_sum  = float(df.loc[succ_mask,"xt_end"].sum())  if succ_mask.any() else 0.0
@@ -396,15 +401,110 @@ def compute_stats(df):
     }
 
 # ==========================
+# ── EDGE BUNDLING ──
+# Agrupa ações com origem/destino próximos em células de grade e
+# distribui os pontos de controle Bézier perpendicularmente,
+# criando feixes visuais em vez de linhas sobrepostas.
+# ==========================
+
+def compute_bundle_offsets(df, bundle_strength: float = 5.0) -> np.ndarray:
+    """
+    Para cada ação, calcula um deslocamento perpendicular (em unidades de campo)
+    para o ponto de controle da curva Bézier quadrática.
+
+    Ações com células de origem+destino idênticas são espalhadas
+    simetricamente ao redor do eixo central do feixe.
+
+    Parâmetros
+    ----------
+    df               : DataFrame com colunas x_start, y_start, x_end, y_end
+    bundle_strength  : escala base do deslocamento máximo (unidades de campo)
+
+    Retorna
+    -------
+    offsets : np.ndarray shape (len(df),)  — valor positivo/negativo
+    """
+    n = len(df)
+    offsets = np.zeros(n)
+    if n == 0:
+        return offsets
+
+    # Bucketing: mapeia cada ponto para uma célula da grade
+    sx = np.clip((df["x_start"].values / FIELD_X * BUNDLE_GRID_X).astype(int), 0, BUNDLE_GRID_X - 1)
+    sy = np.clip((df["y_start"].values / FIELD_Y * BUNDLE_GRID_Y).astype(int), 0, BUNDLE_GRID_Y - 1)
+    ex = np.clip((df["x_end"].values   / FIELD_X * BUNDLE_GRID_X).astype(int), 0, BUNDLE_GRID_X - 1)
+    ey = np.clip((df["y_end"].values   / FIELD_Y * BUNDLE_GRID_Y).astype(int), 0, BUNDLE_GRID_Y - 1)
+
+    # Agrupa índices pelo quadruplo (célula_origem, célula_destino)
+    groups: dict = defaultdict(list)
+    for i in range(n):
+        groups[(sx[i], sy[i], ex[i], ey[i])].append(i)
+
+    for key, idxs in groups.items():
+        m = len(idxs)
+        if m == 1:
+            # Ação isolada: sem curvatura (linha quase reta)
+            offsets[idxs[0]] = 0.0
+        else:
+            # Espalha de -spread … +spread de forma simétrica.
+            # O spread cresce com o número de ações no feixe,
+            # mas é limitado para não exagerar.
+            spread = bundle_strength * (1.0 + 0.4 * math.log1p(m - 1))
+            vals = np.linspace(-spread, spread, m)
+            for j, i in enumerate(idxs):
+                offsets[i] = vals[j]
+
+    return offsets
+
+
+def sample_quadratic_bezier(
+        x0: float, y0: float,
+        x1: float, y1: float,
+        offset: float,
+        n: int = BEZIER_SAMPLES
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Amostra uma curva de Bézier quadrática com ponto de controle
+    deslocado perpendicularmente ao segmento de origem→destino.
+
+    O ponto de controle fica no ponto médio da reta + deslocamento
+    perpendicular de magnitude `offset`.
+
+    Retorna (xs, ys) com `n` pontos amostrados.
+    """
+    mx, my = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    dx, dy = x1 - x0, y1 - y0
+    length = math.hypot(dx, dy)
+
+    if length > 1e-6:
+        # Perpendicular unitário (rotação 90° anti-horário)
+        px, py = -dy / length, dx / length
+    else:
+        px, py = 0.0, 1.0
+
+    # Ponto de controle
+    cx = mx + px * offset
+    cy = my + py * offset
+
+    # Bézier quadrática: B(t) = (1-t)²·P0 + 2(1-t)t·Pc + t²·P1
+    t  = np.linspace(0.0, 1.0, n)
+    bx = (1 - t)**2 * x0 + 2 * (1 - t) * t * cx + t**2 * x1
+    by = (1 - t)**2 * y0 + 2 * (1 - t) * t * cy + t**2 * y1
+
+    return bx, by
+
+
+# ==========================
 # Draw helpers
 # ==========================
 def _action_style(is_won, is_top):
-    """Returns (lw, linestyle, alpha, start_size, end_size)"""
-    if not is_won:       return 1.0, ":",  0.28, 12, 18
-    if is_top:           return 2.0, "--", 0.95, 22, 62
+    """Retorna (lw, linestyle, alpha, start_size, end_size)"""
+    if not is_won:  return 1.0, ":",  0.28, 12, 18
+    if is_top:      return 2.0, "--", 0.95, 22, 62
     return 1.3, "--", 0.42, 14, 32
 
-def draw_action_map(df, title, top_n_highlight=20):
+
+def draw_action_map(df, title, top_n_highlight=20, bundle_strength=5.0):
     pitch = Pitch(pitch_type="statsbomb", pitch_color="#1a1a2e",
                   line_color="#ffffff", line_alpha=0.95)
     fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
@@ -412,25 +512,36 @@ def draw_action_map(df, title, top_n_highlight=20):
     ax.axvline(x=FINAL_THIRD_LINE_X, color="#FFD54F", lw=1.0, alpha=0.20)
     ax.axvline(x=HALF_LINE_X,        color="#ffffff", lw=0.6, alpha=0.12, linestyle="--")
 
+    # ── Identifica top-N ──
     top_idxs = set()
     if not df.empty:
-        df_s = df[df["outcome"]=="successful"]
+        df_s = df[df["outcome"] == "successful"]
         if not df_s.empty:
-            top_idxs = set(df_s.sort_values("delta_xt_adj", ascending=False)
-                             .head(top_n_highlight).index)
+            top_idxs = set(
+                df_s.sort_values("delta_xt_adj", ascending=False)
+                    .head(top_n_highlight).index
+            )
 
-    def draw_row(row, idx):
-        color = CMAP_ACTION(NORM_ACTION(float(row["xt_end"])))
-        is_top = idx in top_idxs
+    # ── Calcula offsets de bundling ──
+    offsets = compute_bundle_offsets(df, bundle_strength=bundle_strength)
+
+    def draw_row(row, row_pos: int):
+        color   = CMAP_ACTION(NORM_ACTION(float(row["xt_end"])))
+        is_top  = row.name in top_idxs
         lw, ls, alpha, s_start, s_end = _action_style(row["is_won"], is_top)
+        offset  = offsets[row_pos]
 
-        # ── Dashed line ──
-        ax.plot([row.x_start, row.x_end], [row.y_start, row.y_end],
+        # ── Curva de Bézier (substitui linha reta) ──
+        bx, by = sample_quadratic_bezier(
+            row.x_start, row.y_start,
+            row.x_end,   row.y_end,
+            offset=offset
+        )
+        ax.plot(bx, by,
                 color=color, linestyle=ls, linewidth=lw,
                 alpha=alpha, zorder=3, solid_capstyle="round")
 
-        # ── ORIGIN: hollow ring (open circle) ──
-        # Clearly marks "where the action started"
+        # ── Origem: anel vazio ──
         pitch.scatter(row.x_start, row.y_start,
                       s=s_start, marker="o",
                       facecolors="none",
@@ -438,8 +549,7 @@ def draw_action_map(df, title, top_n_highlight=20):
                       linewidths=1.2 if is_top else 0.9,
                       ax=ax, zorder=5, alpha=alpha)
 
-        # ── DESTINATION: filled diamond ◆ ──
-        # Diamond feels directional and is visually distinct from the ring
+        # ── Destino: diamante preenchido ──
         pitch.scatter(row.x_end, row.y_end,
                       s=s_end, marker="D",
                       facecolors=color,
@@ -447,54 +557,54 @@ def draw_action_map(df, title, top_n_highlight=20):
                       linewidths=0.7 if is_top else 0.4,
                       ax=ax, zorder=6, alpha=alpha)
 
-        # Video indicator
+        # Indicador de vídeo
         if has_video_value(row["video"]):
             pitch.scatter(row.x_start, row.y_start,
-                          s=s_start+40, marker="o", facecolors="none",
+                          s=s_start + 40, marker="o", facecolors="none",
                           edgecolors="#FFD54F", linewidths=1.8,
                           ax=ax, zorder=7, alpha=alpha)
 
-    # Non-top first, top on top
-    for idx, row in df.iterrows():
+    # Renderiza não-top primeiro, top por cima
+    for pos, (idx, row) in enumerate(df.iterrows()):
         if idx not in top_idxs:
-            draw_row(row, idx)
-    for idx, row in df.iterrows():
+            draw_row(row, pos)
+    for pos, (idx, row) in enumerate(df.iterrows()):
         if idx in top_idxs:
-            draw_row(row, idx)
+            draw_row(row, pos)
 
     ax.set_title(title, fontsize=12, color="#ffffff", pad=8)
 
-    # Compact legend
+    # Legenda compacta
     legend_items = [
-        ax.scatter([],[], s=18, marker="o", facecolors="none",
+        ax.scatter([], [], s=18, marker="o", facecolors="none",
                    edgecolors="#fd8d3c", linewidths=1.2, label="Origin"),
-        ax.scatter([],[], s=45, marker="D", facecolors="#fd8d3c",
+        ax.scatter([], [], s=45, marker="D", facecolors="#fd8d3c",
                    edgecolors="white",    linewidths=0.7, label="Destination"),
-        ax.plot([],[],  color="#fd8d3c", linestyle="--", lw=2.0,
+        ax.plot([], [], color="#fd8d3c", linestyle="--", lw=2.0,
                 label=f"Top {top_n_highlight}")[0],
-        ax.plot([],[],  color="#aaaaaa", linestyle=":", lw=1.0,
+        ax.plot([], [], color="#aaaaaa", linestyle=":", lw=1.0,
                 label="Failed")[0],
     ]
     legend = ax.legend(handles=legend_items, loc="upper left",
-                       bbox_to_anchor=(0.01,0.99),
+                       bbox_to_anchor=(0.01, 0.99),
                        frameon=True, facecolor="#1a1a2e", edgecolor="#444466",
                        fontsize="xx-small", labelspacing=0.35, borderpad=0.5,
                        handletextpad=0.4)
     for t in legend.get_texts(): t.set_color("white")
     legend.get_frame().set_alpha(0.90)
 
-    # Colorbar (xT end scale)
+    # Colorbar
     sm   = plt.cm.ScalarMappable(cmap=CMAP_ACTION, norm=NORM_ACTION)
     cbar = fig.colorbar(sm, ax=ax, fraction=0.025, pad=0.01, shrink=0.72)
     cbar.set_label("xT end", color="#cccccc", fontsize=7, labelpad=3)
     cbar.ax.yaxis.set_tick_params(color="#cccccc", labelsize=6)
-    plt.setp(plt.getp(cbar.ax.axes,"yticklabels"), color="#cccccc")
+    plt.setp(plt.getp(cbar.ax.axes, "yticklabels"), color="#cccccc")
 
     fig.patches.append(FancyArrowPatch(
-        (0.44,0.04),(0.54,0.04), transform=fig.transFigure,
+        (0.44, 0.04), (0.54, 0.04), transform=fig.transFigure,
         arrowstyle="-|>", mutation_scale=13, linewidth=1.8, color="#cccccc"))
-    fig.text(0.49,0.015,"Attack Direction",
-             ha="center",va="center",fontsize=8,color="#cccccc")
+    fig.text(0.49, 0.015, "Attack Direction",
+             ha="center", va="center", fontsize=8, color="#cccccc")
 
     fig.tight_layout(); fig.canvas.draw()
     buf = BytesIO()
@@ -506,46 +616,47 @@ def draw_action_map(df, title, top_n_highlight=20):
 def draw_corridor_heatmap(df, title="Zone Heatmap — Completed Actions"):
     df_s   = df[df["is_won"]].copy()
     x_bins = np.linspace(0, FIELD_X, 7)
-    corridors = {"left":(LANE_LEFT_MIN,FIELD_Y),
-                 "center":(LANE_RIGHT_MAX,LANE_LEFT_MIN),
-                 "right":(0.0,LANE_RIGHT_MAX)}
+    corridors = {"left":  (LANE_LEFT_MIN, FIELD_Y),
+                 "center":(LANE_RIGHT_MAX, LANE_LEFT_MIN),
+                 "right": (0.0, LANE_RIGHT_MAX)}
     counts = {}
-    for cname,(y0,y1) in corridors.items():
+    for cname, (y0, y1) in corridors.items():
         arr = np.zeros(6, dtype=int)
         for i in range(6):
-            x0,x1 = x_bins[i],x_bins[i+1]
-            arr[i] = int(((df_s.x_end>=x0)&(df_s.x_end<x1)&
-                          (df_s.y_end>=y0)&(df_s.y_end<y1)).sum())
+            x0, x1 = x_bins[i], x_bins[i+1]
+            arr[i] = int(((df_s.x_end >= x0) & (df_s.x_end < x1) &
+                          (df_s.y_end >= y0) & (df_s.y_end < y1)).sum())
         counts[cname] = arr
 
-    vmax = max(1, int(np.concatenate(list(counts.values())).max()))
+    vmax  = max(1, int(np.concatenate(list(counts.values())).max()))
     pitch = Pitch(pitch_type="statsbomb", pitch_color="#1a1a2e",
                   line_color="#ffffff", line_alpha=0.95)
     fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
     fig.set_facecolor("#1a1a2e"); fig.set_dpi(FIG_DPI)
 
     cmap_h = LinearSegmentedColormap.from_list(
-        "wr",["#ffffff","#ffecec","#ffbfbf","#ff8080","#ff3b3b","#ff0000"])
-    norm_h = Normalize(vmin=0, vmax=vmax); thr = max(1, vmax*0.35)
+        "wr", ["#ffffff","#ffecec","#ffbfbf","#ff8080","#ff3b3b","#ff0000"])
+    norm_h = Normalize(vmin=0, vmax=vmax); thr = max(1, vmax * 0.35)
 
-    for cname,(y0,y1) in corridors.items():
-        for i,val in enumerate(counts[cname]):
-            x0,x1 = x_bins[i],x_bins[i+1]
-            ax.add_patch(Rectangle((x0,y0),x1-x0,y1-y0,
+    for cname, (y0, y1) in corridors.items():
+        for i, val in enumerate(counts[cname]):
+            x0, x1 = x_bins[i], x_bins[i+1]
+            ax.add_patch(Rectangle((x0, y0), x1-x0, y1-y0,
                          facecolor=cmap_h(norm_h(val)),
-                         edgecolor=(1,1,1,0.12),lw=0.6,alpha=0.95,zorder=2))
-            ax.text((x0+x1)/2,(y0+y1)/2,str(val),
-                    ha="center",va="center",zorder=4,fontsize=11,
-                    color="#000000" if val<=thr else "#ffffff",
-                    fontweight="700" if val>=vmax*0.5 else "600")
+                         edgecolor=(1,1,1,0.12), lw=0.6, alpha=0.95, zorder=2))
+            ax.text((x0+x1)/2, (y0+y1)/2, str(val),
+                    ha="center", va="center", zorder=4, fontsize=11,
+                    color="#000000" if val <= thr else "#ffffff",
+                    fontweight="700" if val >= vmax * 0.5 else "600")
 
     ax.set_title(title, fontsize=12, color="#ffffff", pad=8)
-    ax.axhline(y=LANE_LEFT_MIN,  color="#ffffff",lw=0.5,alpha=0.15,linestyle="--",zorder=3)
-    ax.axhline(y=LANE_RIGHT_MAX, color="#ffffff",lw=0.5,alpha=0.15,linestyle="--",zorder=3)
+    ax.axhline(y=LANE_LEFT_MIN,  color="#ffffff", lw=0.5, alpha=0.15, linestyle="--", zorder=3)
+    ax.axhline(y=LANE_RIGHT_MAX, color="#ffffff", lw=0.5, alpha=0.15, linestyle="--", zorder=3)
     fig.patches.append(FancyArrowPatch(
-        (0.44,0.04),(0.54,0.04), transform=fig.transFigure,
+        (0.44, 0.04), (0.54, 0.04), transform=fig.transFigure,
         arrowstyle="-|>", mutation_scale=13, linewidth=1.8, color="#cccccc"))
-    fig.text(0.49,0.015,"Attack Direction",ha="center",va="center",fontsize=8,color="#cccccc")
+    fig.text(0.49, 0.015, "Attack Direction",
+             ha="center", va="center", fontsize=8, color="#cccccc")
     fig.tight_layout(); fig.canvas.draw()
     buf = BytesIO()
     fig.savefig(buf, format="png", dpi=FIG_DPI, facecolor=fig.get_facecolor())
@@ -554,10 +665,10 @@ def draw_corridor_heatmap(df, title="Zone Heatmap — Completed Actions"):
 
 
 # ==========================
-# Top-10 mini table (no start/end coords)
+# Top-10 mini table
 # ==========================
 def render_top10(df):
-    df_s = df[(df["outcome"]=="successful") & (df["delta_xt_adj"]>0)]
+    df_s = df[(df["outcome"] == "successful") & (df["delta_xt_adj"] > 0)]
     if df_s.empty:
         st.caption("No successful actions with positive ΔxT.")
         return
@@ -612,6 +723,7 @@ with col_filters:
     st.markdown("### 🏟️ Match Selection")
     selected_match = st.selectbox("Choose the match", list(full_data.keys()), index=0)
     st.markdown('<hr class="filter-divider">', unsafe_allow_html=True)
+
     st.markdown("### 🎯 Action Filter")
     action_filter = st.radio(
         "Filter actions to display",
@@ -623,6 +735,21 @@ with col_filters:
         index=0,
     )
     top_n = st.number_input("Top N", min_value=1, max_value=100, value=20, step=1)
+
+    st.markdown('<hr class="filter-divider">', unsafe_allow_html=True)
+
+    # ── Controle de bundling ──
+    st.markdown("### 〰️ Edge Bundling")
+    bundle_strength = st.slider(
+        "Bundle strength",
+        min_value=0.0, max_value=15.0, value=5.0, step=0.5,
+        help=(
+            "0 = linhas retas (sem bundling).\n"
+            "Valores maiores afastam mais as curvas de feixes próximos, "
+            "reduzindo sobreposição."
+        ),
+    )
+
     st.markdown('</div>', unsafe_allow_html=True)
 
 # Session state
@@ -645,14 +772,14 @@ with col_field:
     if action_filter == "All Actions":
         df_base = df_base.reset_index(drop=True)
     elif action_filter == "Top N Actions (ΔxT)":
-        df_s    = df_base[df_base["outcome"]=="successful"]
+        df_s    = df_base[df_base["outcome"] == "successful"]
         df_base = df_s.sort_values("delta_xt_adj", ascending=False).head(int(top_n)).reset_index(drop=True)
     elif action_filter == "Unsuccessful Actions":
-        df_base = df_base[df_base["outcome"]=="failed"].reset_index(drop=True)
+        df_base = df_base[df_base["outcome"] == "failed"].reset_index(drop=True)
     elif action_filter == "Successful Actions":
-        df_base = df_base[df_base["outcome"]=="successful"].reset_index(drop=True)
+        df_base = df_base[df_base["outcome"] == "successful"].reset_index(drop=True)
     elif action_filter == "Positive xT only":
-        df_base = df_base[(df_base["outcome"]=="successful") & (df_base["delta_xt"]>0)].reset_index(drop=True)
+        df_base = df_base[(df_base["outcome"] == "successful") & (df_base["delta_xt"] > 0)].reset_index(drop=True)
 
     DISPLAY_WIDTH        = 780
     pass_map_placeholder = st.empty()
@@ -664,19 +791,20 @@ with col_field:
     heat_click = streamlit_image_coordinates(heat_img, width=DISPLAY_WIDTH)
 
     if heat_click is not None:
-        rw, rh   = heat_img.size
-        px = heat_click["x"]*(rw/heat_click["width"])
-        py = heat_click["y"]*(rh/heat_click["height"])
-        fx, fy   = hax.transData.inverted().transform((px, rh-py))
-        xb = np.linspace(0, FIELD_X, 7)
-        ix = max(0, min(5, np.searchsorted(xb, fx, side="right")-1))
-        x0,x1 = xb[ix], xb[ix+1]
-        if   fy >= LANE_LEFT_MIN:  cn,y0,y1 = "left",   LANE_LEFT_MIN,  FIELD_Y
-        elif fy <  LANE_RIGHT_MAX: cn,y0,y1 = "right",  0.0,            LANE_RIGHT_MAX
-        else:                      cn,y0,y1 = "center", LANE_RIGHT_MAX, LANE_LEFT_MIN
+        rw, rh  = heat_img.size
+        px = heat_click["x"] * (rw / heat_click["width"])
+        py = heat_click["y"] * (rh / heat_click["height"])
+        fx, fy  = hax.transData.inverted().transform((px, rh - py))
+        xb      = np.linspace(0, FIELD_X, 7)
+        ix      = max(0, min(5, np.searchsorted(xb, fx, side="right") - 1))
+        x0, x1  = xb[ix], xb[ix+1]
+        if   fy >= LANE_LEFT_MIN:  cn, y0, y1 = "left",   LANE_LEFT_MIN,  FIELD_Y
+        elif fy <  LANE_RIGHT_MAX: cn, y0, y1 = "right",  0.0,            LANE_RIGHT_MAX
+        else:                      cn, y0, y1 = "center", LANE_RIGHT_MAX, LANE_LEFT_MIN
         st.session_state["heat_selection"] = {
-            "ix":int(ix),"corridor":cn,
-            "x0":float(x0),"x1":float(x1),"y0":float(y0),"y1":float(y1)}
+            "ix": int(ix), "corridor": cn,
+            "x0": float(x0), "x1": float(x1),
+            "y0": float(y0), "y1": float(y1)}
     plt.close(hfig)
 
     # ── Action Map + Top 10 ──
@@ -685,17 +813,15 @@ with col_field:
         if st.session_state["heat_selection"] is not None:
             sel = st.session_state["heat_selection"]
             df_to_draw = df_base[
-                (df_base.x_end>=sel["x0"])&(df_base.x_end<sel["x1"])&
-                (df_base.y_end>=sel["y0"])&(df_base.y_end<sel["y1"])
+                (df_base.x_end >= sel["x0"]) & (df_base.x_end < sel["x1"]) &
+                (df_base.y_end >= sel["y0"]) & (df_base.y_end < sel["y1"])
             ].reset_index(drop=True)
 
-        # Top 10 BEFORE the map
         st.markdown(
             '<h4 style="color:#ffffff;margin:0 0 3px 0;">🏆 Top 10 — ΔxT adj &amp; xT End</h4>',
             unsafe_allow_html=True)
         render_top10(df_to_draw)
 
-        # Action Map
         st.markdown('<h4 style="color:#ffffff;margin:4px 0 3px 0;">Action Map</h4>',
                     unsafe_allow_html=True)
         if st.button("Limpar filtro do quadrante", key="clear_heat_filter"):
@@ -704,26 +830,28 @@ with col_field:
         img_obj, ax, fig = draw_action_map(
             df_to_draw,
             title=f"Action Map — {selected_match}",
-            top_n_highlight=int(top_n))
+            top_n_highlight=int(top_n),
+            bundle_strength=float(bundle_strength),   # ← passa o slider
+        )
         click = streamlit_image_coordinates(img_obj, width=DISPLAY_WIDTH)
 
     selected_action = None
     if click is not None:
-        rw, rh   = img_obj.size
-        px = click["x"]*(rw/click["width"])
-        py = click["y"]*(rh/click["height"])
-        fx, fy   = ax.transData.inverted().transform((px, rh-py))
-        df_sel   = df_to_draw.copy()
-        df_sel["dist"] = np.sqrt((df_sel.x_start-fx)**2+(df_sel.y_start-fy)**2)
-        cands = df_sel[df_sel["dist"]<5.0]
+        rw, rh  = img_obj.size
+        px = click["x"] * (rw / click["width"])
+        py = click["y"] * (rh / click["height"])
+        fx, fy  = ax.transData.inverted().transform((px, rh - py))
+        df_sel  = df_to_draw.copy()
+        df_sel["dist"] = np.sqrt((df_sel.x_start - fx)**2 + (df_sel.y_start - fy)**2)
+        cands = df_sel[df_sel["dist"] < 5.0]
         if not cands.empty:
             selected_action = cands.sort_values("dist").iloc[0]
     plt.close(fig)
 
     if st.session_state["heat_selection"] is not None:
         sel  = st.session_state["heat_selection"]
-        smsk = ((df_base.x_end>=sel["x0"])&(df_base.x_end<sel["x1"])&
-                (df_base.y_end>=sel["y0"])&(df_base.y_end<sel["y1"]))
+        smsk = ((df_base.x_end >= sel["x0"]) & (df_base.x_end < sel["x1"]) &
+                (df_base.y_end >= sel["y0"]) & (df_base.y_end < sel["y1"]))
         st.markdown(
             f"<div style='color:#ffffff;margin-top:4px;'>"
             f"<strong>Filtro:</strong> corredor <code>{sel['corridor']}</code>, "
@@ -746,12 +874,12 @@ with col_field:
             f'— {selected_action["type"]}</strong></div>',
             unsafe_allow_html=True)
 
-        c1,c2 = st.columns(2)
+        c1, c2 = st.columns(2)
         c1.write(f"**Start:** ({selected_action.x_start:.2f}, {selected_action.y_start:.2f})")
         c2.write(f"**End:**   ({selected_action.x_end:.2f},   {selected_action.y_end:.2f})")
 
-        dir_emoji = {"forward":"⬆️","backward":"⬇️","lateral":"↔️"}
-        t1,t2,t3 = st.columns(3)
+        dir_emoji = {"forward": "⬆️", "backward": "⬇️", "lateral": "↔️"}
+        t1, t2, t3 = st.columns(3)
         t1.write(f"**Direction:** {dir_emoji.get(selected_action['direction'],'')} "
                  f"{selected_action['direction'].capitalize()}")
         t2.write(f"**Successful:** {'✅' if selected_action['is_won'] else '❌'}")
@@ -768,7 +896,7 @@ with col_field:
                   if selected_action["delta_xt_adj"] != 0 else None)
 
         if has_video_value(selected_action["video"]):
-            try: st.video(selected_action["video"])
+            try:    st.video(selected_action["video"])
             except Exception: st.error(f"Video not found: {selected_action['video']}")
         else:
             st.warning("No video attached to this event.")
@@ -795,52 +923,48 @@ with col_stats:
 
     with st.expander("General Statistics", expanded=False):
         st.markdown('<div class="stats-section-title">Overview</div>', unsafe_allow_html=True)
-        r1,r2,r3 = st.columns(3)
+        r1, r2, r3 = st.columns(3)
         with r1: small_metric("Total Actions", f"{stats['total_actions']}")
         with r2: small_metric("Successful",    f"{stats['successful_actions']}")
         with r3: small_metric("Accuracy",      f"{stats['accuracy_pct']:.1f}%")
         st.markdown("<hr style='margin:6px 0 8px 0;'>", unsafe_allow_html=True)
         st.markdown('<div class="stats-section-title">Directions</div>', unsafe_allow_html=True)
-        d1,d2,d3 = st.columns(3)
+        d1, d2, d3 = st.columns(3)
         with d1: small_metric("⬆️ Forward",  f"{stats['forward_total']}")
         with d2: small_metric("⬇️ Backward", f"{stats['backward_total']}")
         with d3: small_metric("↔️ Lateral",  f"{stats['lateral_total']}")
 
     with st.expander("xT Statistics", expanded=True):
-        # Row 1 — global
         st.markdown('<div class="stats-section-title">All successful actions</div>',
                     unsafe_allow_html=True)
-        a1,a2,a3 = st.columns(3)
-        with a1: small_metric("Σ ΔxT",          f"{stats['pos_sum']:.2f}")
-        with a2: small_metric("Mean ΔxT",        f"{stats['pos_mean']:.2f}")
-        with a3: small_metric("% ΔxT > 0",       f"{stats['pos_pct']:.1f}%")
+        a1, a2, a3 = st.columns(3)
+        with a1: small_metric("Σ ΔxT",    f"{stats['pos_sum']:.4f}")
+        with a2: small_metric("Mean ΔxT", f"{stats['pos_mean']:.4f}")
+        with a3: small_metric("% ΔxT > 0",f"{stats['pos_pct']:.1f}%")
 
         st.markdown("<hr style='margin:6px 0 8px 0;'>", unsafe_allow_html=True)
-
-        # Row 2 — top 10
         st.markdown('<div class="stats-section-title">Top 10 actions</div>',
                     unsafe_allow_html=True)
-        b1,b2 = st.columns(2)
-        with b1: small_metric("Σ ΔxT Top 10",   f"{stats['top10_sum']:.2f}")
-        with b2: small_metric("Mean ΔxT Top 10", f"{stats['top10_mean']:.2f}")
+        b1, b2 = st.columns(2)
+        with b1: small_metric("Σ ΔxT Top 10",   f"{stats['top10_sum']:.4f}")
+        with b2: small_metric("Mean ΔxT Top 10", f"{stats['top10_mean']:.4f}")
 
         st.markdown("<hr style='margin:6px 0 8px 0;'>", unsafe_allow_html=True)
-
-        # Row 3 — xT End
         st.markdown('<div class="stats-section-title">xT End (successful actions ◆)</div>',
                     unsafe_allow_html=True)
-        c1,c2 = st.columns(2)
-        with c1: small_metric("Σ xT End",   f"{stats['xt_end_sum']:.2f}")
-        with c2: small_metric("Mean xT End", f"{stats['xt_end_mean']:.2f}")
+        c1, c2 = st.columns(2)
+        with c1: small_metric("Σ xT End",   f"{stats['xt_end_sum']:.4f}")
+        with c2: small_metric("Mean xT End", f"{stats['xt_end_mean']:.4f}")
 
     with st.expander("Failed Actions", expanded=False):
         st.markdown('<div class="stats-section-title">xT contrários</div>', unsafe_allow_html=True)
-        fx1,fx2,fx3 = st.columns(3)
-        with fx1: small_metric("Failed",               f"{stats['failed_count']}")
-        with fx2: small_metric("Σ xT start — failed",  f"{stats['failed_xt_sum']:.2f}")
-        with fx3: small_metric("Mean xT — failed",     f"{stats['failed_xt_mean']:.2f}")
+        fx1, fx2, fx3 = st.columns(3)
+        with fx1: small_metric("Failed",              f"{stats['failed_count']}")
+        with fx2: small_metric("Σ xT start — failed", f"{stats['failed_xt_sum']:.4f}")
+        with fx3: small_metric("Mean xT — failed",    f"{stats['failed_xt_mean']:.4f}")
 
     st.divider()
     st.caption(
         "○ = origem  ◆ = destino  |  Cor = xT End (amarelo → vermelho escuro)  |  "
-        "ΔxT adj = ΔxT × (1 + bônus log-distância).")
+        "ΔxT adj = ΔxT × (1 + bônus log-distância)  |  "
+        "Curvas = Bézier quadrática (bundling por zona).")
