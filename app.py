@@ -1865,7 +1865,7 @@ with tab_maps:
 
     with col_main:
 
-        DISPLAY_WIDTH = 1120
+        DISPLAY_WIDTH = 920
 
         df_to_draw = df_base
 
