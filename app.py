@@ -910,19 +910,19 @@ def draw_corridor_heatmap(df, title='Zone Heatmap - Completed Actions'):
 
     df_s = df[df['is_won']].copy()
 
-    # White → light pink → salmon → red → dark red (matches ex.png style)
+    # White -> soft pink -> red -> dark red for an elegant style.
 
     cmap_h = LinearSegmentedColormap.from_list(
 
         'hex_heat',
 
-        ['#ffffff', '#fcc5c5', '#f07070', '#cc2020', '#7a0000'],
+        ['#fffdfd', '#f9dede', '#f29a9a', '#d34646', '#7a0000'],
 
         N=256
 
     )
 
-    # line_zorder=3 ensures pitch markings render on top of hexagons (zorder=2)
+    # Keep pitch lines above the hexagons.
 
     pitch = Pitch(pitch_type='statsbomb', pitch_color='#1a1a2e',
 
@@ -938,17 +938,15 @@ def draw_corridor_heatmap(df, title='Zone Heatmap - Completed Actions'):
 
     if not df_s.empty:
 
-        # gridsize=15 gives ~170 hexagons across the pitch area
+        # Fewer and larger hexagons with a balanced X/Y layout.
 
-        # mincnt=1 hides empty hexagons (they vanish into the dark background)
-
-        ax.hexbin(
+        hb = ax.hexbin(
 
             df_s['x_end'],
 
             df_s['y_end'],
 
-            gridsize=15,
+            gridsize=(12, 8),
 
             cmap=cmap_h,
 
@@ -956,15 +954,35 @@ def draw_corridor_heatmap(df, title='Zone Heatmap - Completed Actions'):
 
             extent=[0, FIELD_X, 0, FIELD_Y],
 
-            alpha=0.92,
+            alpha=0.90,
 
             zorder=2,
 
-            linewidths=0.5,
+            linewidths=0.9,
 
-            edgecolors='#1a1a2e'
+            edgecolors=(1, 1, 1, 0.18)
 
         )
+
+        # Strict clipping: no hexagon can render outside the pitch area.
+
+        clip_rect = Rectangle((0, 0), FIELD_X, FIELD_Y, transform=ax.transData)
+
+        hb.set_clip_path(clip_rect)
+
+
+
+    # Subtle guides to keep the visual language closer to v3.
+
+    x_bins = np.linspace(0, FIELD_X, 7)
+
+    for x in x_bins[1:-1]:
+
+        ax.axvline(x=x, color='#ffffff', lw=0.45, alpha=0.08, linestyle='--', zorder=3)
+
+    ax.axhline(y=LANE_LEFT_MIN, color='#ffffff', lw=0.5, alpha=0.12, linestyle='--', zorder=3)
+
+    ax.axhline(y=LANE_RIGHT_MAX, color='#ffffff', lw=0.5, alpha=0.12, linestyle='--', zorder=3)
 
 
 
