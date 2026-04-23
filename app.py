@@ -988,17 +988,16 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
 
 
+    # Draw by priority so higher xT actions naturally overlay lower ones.
+    draw_order = sorted(range(len(df)), key=lambda i: (int(_action_visual(df.iloc[i], pos_ref)[3]), float(scores[i])))
+
     rows = list(df.iterrows())
 
-    for pass_layer in (0, 1, 2):
+    for pos in draw_order:
 
-        for pos, (_, row) in enumerate(rows):
+        _, row = rows[pos]
 
-            layer = _action_visual(row, pos_ref)[3]
-
-            if layer == pass_layer:
-
-                draw_row(row, pos)
+        draw_row(row, pos)
 
 
 
@@ -1167,6 +1166,84 @@ def draw_single_zone_heatmap(df, mode='origin', title='Zone Heatmap'):
     buf.seek(0)
 
     return Image.open(buf), ax, fig
+
+
+
+def draw_zone_heatmaps_panel(df, title='Zone Heatmaps - Origin and Destination'):
+
+    df_s = df[df['is_won']].copy()
+
+    x_bins, y_bins = _zone_bins()
+
+    origin_counts = _zone_counts(df_s, 'x_start', 'y_start')
+
+    dest_counts = _zone_counts(df_s, 'x_end', 'y_end')
+
+    cmap_h = LinearSegmentedColormap.from_list('wr', ['#ffffff', '#ffecec', '#ffbfbf', '#ff8080', '#ff3b3b', '#ff0000'])
+
+    norm_origin = Normalize(vmin=0, vmax=max(1, int(origin_counts.max())))
+
+    norm_dest = Normalize(vmin=0, vmax=max(1, int(dest_counts.max())))
+
+    fig, axes = plt.subplots(1, 2, figsize=(FIG_W * 2.9, FIG_H * 1.55), dpi=FIG_DPI)
+
+    fig.set_facecolor('#1a1a2e')
+
+    pitch = Pitch(pitch_type='statsbomb', pitch_color='#1a1a2e', line_color='#ffffff', line_alpha=0.95)
+
+    for ax, counts, norm_h, subtitle in zip(
+        axes,
+        [origin_counts, dest_counts],
+        [norm_origin, norm_dest],
+        ['Origin', 'Destination']
+    ):
+
+        pitch.draw(ax=ax)
+
+        for row in range(3):
+
+            for col in range(6):
+
+                x0, x1 = x_bins[col], x_bins[col + 1]
+
+                y0, y1 = y_bins[row], y_bins[row + 1]
+
+                val = int(counts[row, col])
+
+                if val == 0:
+
+                    continue
+
+                ax.add_patch(Rectangle((x0, y0), x1 - x0, y1 - y0,
+                                       facecolor=cmap_h(norm_h(val)), edgecolor=(1, 1, 1, 0.12),
+                                       lw=0.6, alpha=0.92, zorder=2))
+
+                vmax_local = max(1, int(counts.max()))
+
+                ax.text((x0 + x1) / 2, (y0 + y1) / 2, str(val),
+                        ha='center', va='center', zorder=4, fontsize=11,
+                        color='#ffffff' if val >= max(2, int(vmax_local * 0.35)) else '#1d1d1d',
+                        fontweight='600')
+
+        ax.set_title(subtitle, fontsize=12, color='#ffffff', pad=7)
+
+        ax.axhline(y=LANE_LEFT_MIN, color='#ffffff', lw=0.5, alpha=0.12, linestyle='--', zorder=3)
+
+        ax.axhline(y=LANE_RIGHT_MAX, color='#ffffff', lw=0.5, alpha=0.12, linestyle='--', zorder=3)
+
+    fig.suptitle(title, fontsize=13, color='#ffffff', y=0.99)
+
+    fig.tight_layout(rect=[0, 0, 1, 0.965])
+
+    fig.canvas.draw()
+
+    buf = BytesIO()
+
+    fig.savefig(buf, format='png', dpi=FIG_DPI, facecolor=fig.get_facecolor())
+
+    buf.seek(0)
+
+    return Image.open(buf), axes, fig
 
 
 
@@ -1809,37 +1886,11 @@ with tab_maps:
 
         st.markdown('<h4 style="color:#ffffff;margin:8px 0 4px 0;">Zone Heatmaps</h4>', unsafe_allow_html=True)
 
-        hm_col_left, hm_col_right = st.columns(2, gap='medium')
+        hm_panel_img, _, hm_panel_fig = draw_zone_heatmaps_panel(df_base)
 
-        with hm_col_left:
+        st.image(hm_panel_img, use_column_width=True)
 
-            st.markdown('<div style="color:#dbeafe;font-size:12px;margin-bottom:4px;">Origin</div>', unsafe_allow_html=True)
-
-            hm_origin_img, _, hm_origin_fig = draw_single_zone_heatmap(df_base, mode='origin', title='Origin')
-
-            st.image(hm_origin_img, use_column_width=True)
-
-            plt.close(hm_origin_fig)
-
-        with hm_col_right:
-
-            st.markdown('<div style="color:#dbeafe;font-size:12px;margin-bottom:4px;">Destination</div>', unsafe_allow_html=True)
-
-            hm_dest_img, _, hm_dest_fig = draw_single_zone_heatmap(df_base, mode='destination', title='Destination')
-
-            st.image(hm_dest_img, use_column_width=True)
-
-            plt.close(hm_dest_fig)
-
-        st.markdown('<h4 style="color:#ffffff;margin:8px 0 4px 0;">Conexão de Zonas</h4>', unsafe_allow_html=True)
-
-        st.caption('Protótipo inicial: conexões mais frequentes entre zonas de origem e destino, com espessura e intensidade pela frequência.')
-
-        conn_img, _, cfig = draw_zone_connections_map(df_base)
-
-        st.image(conn_img, use_column_width=True)
-
-        plt.close(cfig)
+        plt.close(hm_panel_fig)
 
         st.markdown('<h4 style="color:#ffffff;margin:8px 0 4px 0;">Mini Maps - Top Conexões</h4>', unsafe_allow_html=True)
 
