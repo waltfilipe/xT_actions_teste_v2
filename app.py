@@ -1023,7 +1023,7 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
     ]
 
-    legend = ax.legend(handles=legend_items, loc='upper center', bbox_to_anchor=(0.5, -0.145),
+    legend = ax.legend(handles=legend_items, loc='upper center', bbox_to_anchor=(0.5, -0.095),
 
                        ncol=3, frameon=True, facecolor='#1a1a2e', edgecolor='#6b6b8f',
 
@@ -1048,7 +1048,7 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
     plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='#ffe6bf')
 
-    fig.subplots_adjust(left=0.01, right=0.92, top=0.975, bottom=0.17)
+    fig.subplots_adjust(left=0.01, right=0.92, top=0.975, bottom=0.10)
 
     fig.canvas.draw()
     ax_pos = ax.get_position()
