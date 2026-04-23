@@ -998,154 +998,166 @@ def draw_corridor_heatmap(df, title='Zone Heatmap - Completed Actions'):
 def draw_actions_clusters(df, title='Actions Clusters', max_clusters=6):
 
     required_cols = ['x_start', 'y_start', 'x_end', 'y_end']
-
     dfc = df.dropna(subset=required_cols).copy()
 
+    def corridor_name(y):
+        if y >= LANE_LEFT_MIN:
+            return 'left'
+        if y < LANE_RIGHT_MAX:
+            return 'right'
+        return 'center'
 
+    def local_cluster_count(n_rows, k_cap):
+        if n_rows <= 3:
+            return 1
+        if n_rows <= 12:
+            return min(2, k_cap)
+        return min(3, k_cap)
+
+    def build_features(part):
+        dx = part['x_end'].to_numpy(dtype=float) - part['x_start'].to_numpy(dtype=float)
+        dy = part['y_end'].to_numpy(dtype=float) - part['y_start'].to_numpy(dtype=float)
+        angle = np.arctan2(dy, dx)
+        length = np.sqrt(dx ** 2 + dy ** 2)
+        arr = np.column_stack([
+            part['x_start'].to_numpy(dtype=float) / FIELD_X,
+            part['y_start'].to_numpy(dtype=float) / FIELD_Y,
+            dx / FIELD_X,
+            dy / FIELD_Y,
+            length / np.hypot(FIELD_X, FIELD_Y),
+            np.cos(angle),
+            np.sin(angle),
+        ])
+        arr = (arr - arr.mean(axis=0, keepdims=True)) / (arr.std(axis=0, keepdims=True) + 1e-9)
+        return arr
 
     pitch = Pitch(pitch_type='statsbomb', pitch_color='#1a1a2e', line_color='#ffffff', line_alpha=0.95)
 
-    fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
-
-    fig.set_facecolor('#1a1a2e')
-
-    fig.set_dpi(FIG_DPI)
-
-
-
     if len(dfc) < 2:
-
+        fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
+        fig.set_facecolor('#1a1a2e')
+        fig.set_dpi(FIG_DPI)
         ax.set_title(f'{title} (insufficient data)', fontsize=12, color='#ffffff', pad=8)
-
         ax.text(FIELD_X / 2, FIELD_Y / 2, 'Need at least 2 actions to cluster', color='#e5e7eb', fontsize=11, ha='center', va='center')
+        fig.tight_layout()
+        fig.canvas.draw()
+        buf = BytesIO()
+        fig.savefig(buf, format='png', dpi=FIG_DPI, facecolor=fig.get_facecolor())
+        buf.seek(0)
+        return Image.open(buf), ax, fig
 
-    else:
+    dfc['corridor'] = dfc['y_start'].apply(corridor_name)
 
-        dfc['angle'] = np.arctan2(dfc['y_end'] - dfc['y_start'], dfc['x_end'] - dfc['x_start'])
+    corridor_order = ['left', 'center', 'right']
+    corridor_labels = {'left': 'Left Corridor', 'center': 'Center Corridor', 'right': 'Right Corridor'}
+    clusters_meta = []
 
-        features = dfc[['x_start', 'y_start', 'x_end', 'y_end', 'angle']].to_numpy(dtype=float)
+    max_clusters = max(2, int(max_clusters))
+    cluster_global_id = 0
+    for cname in corridor_order:
+        part = dfc[dfc['corridor'] == cname].copy()
+        if part.empty:
+            continue
 
-
-
-        k = max(2, min(int(max_clusters), len(dfc)))
-
-        if KMeans is not None:
-
-            labels = KMeans(n_clusters=k, random_state=2147, n_init=10).fit_predict(features)
-
+        local_cap = max(1, min(3, max_clusters))
+        k_local = min(local_cluster_count(len(part), local_cap), len(part))
+        if k_local <= 1:
+            part['cluster_local'] = 0
         else:
+            features = build_features(part)
+            if KMeans is not None:
+                part['cluster_local'] = KMeans(n_clusters=k_local, random_state=2147, n_init=10).fit_predict(features)
+            else:
+                ranks = pd.Series(features[:, 5] + features[:, 6]).rank(method='first')
+                part['cluster_local'] = pd.qcut(ranks, q=k_local, labels=False, duplicates='drop').astype(int).to_numpy()
 
-            # Fallback when scikit-learn is unavailable: angle buckets mimic route grouping.
+        for local_idx in sorted(part['cluster_local'].unique()):
+            sub = part[part['cluster_local'] == local_idx].copy()
+            if sub.empty:
+                continue
+            sub['cluster_id'] = cluster_global_id
+            clusters_meta.append({
+                'cluster_id': cluster_global_id,
+                'corridor': cname,
+                'corridor_label': corridor_labels[cname],
+                'df': sub,
+            })
+            cluster_global_id += 1
 
-            labels = pd.qcut(dfc['angle'].rank(method='first'), q=k, labels=False, duplicates='drop').astype(int).to_numpy()
+    if not clusters_meta:
+        fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
+        fig.set_facecolor('#1a1a2e')
+        fig.set_dpi(FIG_DPI)
+        ax.set_title(f'{title} (no clusters)', fontsize=12, color='#ffffff', pad=8)
+        ax.text(FIELD_X / 2, FIELD_Y / 2, 'No clusters available for this filter', color='#e5e7eb', fontsize=11, ha='center', va='center')
+        fig.tight_layout()
+        fig.canvas.draw()
+        buf = BytesIO()
+        fig.savefig(buf, format='png', dpi=FIG_DPI, facecolor=fig.get_facecolor())
+        buf.seek(0)
+        return Image.open(buf), ax, fig
 
-            k = int(np.unique(labels).size)
+    k_total = len(clusters_meta)
+    ncols = 2 if k_total > 1 else 1
+    nrows = int(np.ceil(k_total / ncols))
+    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(FIG_W * ncols, FIG_H * nrows), dpi=FIG_DPI)
+    fig.patch.set_facecolor('#1a1a2e')
 
+    if isinstance(axes, np.ndarray):
+        axes_flat = axes.ravel()
+    else:
+        axes_flat = np.array([axes])
 
+    cmap = plt.cm.get_cmap('tab10', max(3, k_total))
+    for i, meta in enumerate(clusters_meta):
+        ax = axes_flat[i]
+        pitch.draw(ax=ax)
+        ax.set_facecolor('#1a1a2e')
 
-        dfc['cluster'] = labels
+        part = meta['df']
+        color = cmap(meta['cluster_id'])
 
-        cmap = plt.cm.get_cmap('tab10', k)
-
-
-
-        for cl in sorted(dfc['cluster'].unique()):
-
-            part = dfc[dfc['cluster'] == cl]
-
-            color = cmap(int(cl))
-
-            pitch.arrows(
-
-                part['x_start'],
-
-                part['y_start'],
-
-                part['x_end'],
-
-                part['y_end'],
-
-                color=color,
-
-                alpha=0.45,
-
-                width=1.5,
-
-                headwidth=4,
-
-                headlength=5,
-
-                ax=ax,
-
-                zorder=3,
-
-            )
-
-            pitch.scatter(part['x_start'], part['y_start'], s=11, color=color, alpha=0.35, ax=ax, zorder=4)
-
-
-
-        ax.set_title(f'{title} (k={k}, n={len(dfc)})', fontsize=12, color='#ffffff', pad=8)
-
-        legend_items = [
-
-            ax.plot([], [], color=cmap(i), linewidth=3, label=f'Cluster {i + 1}')[0]
-
-            for i in range(k)
-
-        ]
-
-        legend = ax.legend(
-
-            handles=legend_items,
-
-            loc='upper left',
-
-            bbox_to_anchor=(0.01, 0.99),
-
-            frameon=True,
-
-            facecolor='#1a1a2e',
-
-            edgecolor='#444466',
-
-            fontsize='xx-small',
-
-            ncol=2,
-
-            labelspacing=0.35,
-
-            borderpad=0.45,
-
-            handletextpad=0.4,
-
+        pitch.arrows(
+            part['x_start'],
+            part['y_start'],
+            part['x_end'],
+            part['y_end'],
+            color=color,
+            alpha=0.17,
+            width=1.0,
+            headwidth=3,
+            headlength=4,
+            ax=ax,
+            zorder=2,
         )
 
-        for t in legend.get_texts():
+        sx = float(part['x_start'].mean())
+        sy = float(part['y_start'].mean())
+        ex = float(part['x_end'].mean())
+        ey = float(part['y_end'].mean())
 
-            t.set_color('white')
+        pitch.arrows([sx], [sy], [ex], [ey], color='white', alpha=0.95, width=2.8, headwidth=6, headlength=6, ax=ax, zorder=4)
+        pitch.arrows([sx], [sy], [ex], [ey], color=color, alpha=0.98, width=2.0, headwidth=5, headlength=5, ax=ax, zorder=5)
+        pitch.scatter([sx], [sy], s=38, color='white', edgecolors='#111111', linewidths=0.6, ax=ax, zorder=6)
 
-        legend.get_frame().set_alpha(0.90)
+        ax.set_title(
+            f"Cluster {meta['cluster_id'] + 1} - {meta['corridor_label']} (n={len(part)})",
+            fontsize=10,
+            color='#ffffff',
+            pad=6,
+        )
 
+    for j in range(k_total, len(axes_flat)):
+        axes_flat[j].axis('off')
 
-
-    fig.patches.append(FancyArrowPatch((0.44, 0.04), (0.54, 0.04), transform=fig.transFigure, arrowstyle='-|>', mutation_scale=13, linewidth=1.8, color='#cccccc'))
-
-    fig.text(0.49, 0.015, 'Attack Direction', ha='center', va='center', fontsize=8, color='#cccccc')
-
-
-
-    fig.tight_layout()
-
+    fig.suptitle(f'{title} - Corridor-first clustering (k={k_total}, n={len(dfc)})', color='#ffffff', fontsize=12, y=0.995)
+    fig.tight_layout(rect=[0, 0, 1, 0.985])
     fig.canvas.draw()
 
     buf = BytesIO()
-
     fig.savefig(buf, format='png', dpi=FIG_DPI, facecolor=fig.get_facecolor())
-
     buf.seek(0)
-
-    return Image.open(buf), ax, fig
+    return Image.open(buf), axes_flat[0], fig
 
 
 
@@ -1474,6 +1486,22 @@ with tab_maps:
 
         top_n = st.number_input('Top N', min_value=1, max_value=100, value=20, step=1)
 
+        st.markdown('<hr class="filter-divider">', unsafe_allow_html=True)
+
+        st.markdown('### Clusters (Clean View)')
+
+        cluster_source = st.selectbox(
+
+            'Actions for clustering',
+
+            ['Successful + Positive xT', 'Successful only', 'All actions (current filter)'],
+
+            index=0,
+
+        )
+
+        cluster_max = st.slider('Max clusters', min_value=2, max_value=8, value=6, step=1)
+
         st.markdown('</div>', unsafe_allow_html=True)
 
 
@@ -1620,9 +1648,33 @@ with tab_maps:
 
         st.markdown('<h4 style="color:#ffffff;margin:8px 0 4px 0;">Actions Clusters</h4>', unsafe_allow_html=True)
 
-        cl_img, _, cl_fig = draw_actions_clusters(df_to_draw, title=f'Actions Clusters - {selected_match}')
+        df_cluster = df_to_draw.copy()
+
+        if cluster_source == 'Successful + Positive xT':
+
+            df_cluster = df_cluster[(df_cluster['outcome'] == 'successful') & (df_cluster['delta_xt_adj'] > 0)]
+
+        elif cluster_source == 'Successful only':
+
+            df_cluster = df_cluster[df_cluster['outcome'] == 'successful']
+
+        cl_img, _, cl_fig = draw_actions_clusters(
+
+            df_cluster,
+
+            title=f'Actions Clusters - {selected_match}',
+
+            max_clusters=int(cluster_max),
+
+        )
 
         st.image(cl_img, width=DISPLAY_WIDTH)
+
+        st.caption(
+
+            f'Cluster input: {cluster_source} | Rows used: {len(df_cluster)} | Corridor-first grouping for cleaner shape separation.'
+
+        )
 
         plt.close(cl_fig)
 
