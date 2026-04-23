@@ -905,8 +905,8 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
     pitch = Pitch(pitch_type='statsbomb', pitch_color='#1a1a2e', line_color='#ffffff', line_alpha=0.95)
 
-    # figsize: 12×8.6 keeps ~3:2 pitch ratio while leaving a slim strip for legend+arrow
-    fig, ax = pitch.draw(figsize=(12.0, 8.6))
+    # Slightly reduce figure height and use a compact bottom strip for arrow + legend.
+    fig, ax = pitch.draw(figsize=(11.2, 7.7))
 
     fig.set_facecolor('#1a1a2e')
 
@@ -1026,7 +1026,7 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
     ]
 
-    legend = ax.legend(handles=legend_items, loc='upper center', bbox_to_anchor=(0.5, -0.06),
+    legend = ax.legend(handles=legend_items, loc='upper center', bbox_to_anchor=(0.5, -0.145),
 
                        ncol=3, frameon=True, facecolor='#1a1a2e', edgecolor='#6b6b8f',
 
@@ -1051,22 +1051,22 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
     plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='#ffe6bf')
 
-    # tight_layout: reserve just enough at bottom for legend + arrow.
-    fig.tight_layout(rect=[0, 0.08, 1.0, 0.98])
+    # Tighten margins so the background area stays close to the pitch.
+    fig.subplots_adjust(left=0.035, right=0.965, top=0.92, bottom=0.165)
 
     # Place attack direction arrow/text AFTER tight_layout so positions are correct.
     fig.canvas.draw()
     ax_pos = ax.get_position()  # axes position in figure fraction
     cx = (ax_pos.x0 + ax_pos.x1) / 2
-    # Place arrow/text centred in the strip below the axes
-    strip_mid = ax_pos.y0 * 0.40
+    # Keep the arrow immediately below the pitch and the legend below the arrow.
+    strip_mid = ax_pos.y0 - 0.022
     fig.patches.append(FancyArrowPatch(
-        (cx - 0.06, strip_mid), (cx + 0.06, strip_mid),
+        (cx - 0.055, strip_mid), (cx + 0.055, strip_mid),
         transform=fig.transFigure, arrowstyle='-|>',
-        mutation_scale=15, linewidth=2.0, color='#cccccc'))
-    fig.text(cx, strip_mid - 0.020, 'Attack Direction',
+        mutation_scale=14, linewidth=1.9, color='#cccccc'))
+    fig.text(cx, strip_mid - 0.010, 'Attack Direction',
              ha='center', va='top', transform=fig.transFigure,
-             fontsize=10, color='#cccccc')
+             fontsize=9.5, color='#cccccc')
 
     buf = BytesIO()
 
@@ -2105,5 +2105,3 @@ with tab_stats:
 
 
     st.caption('Mapping: origin (ring), destination (diamond), color by xT End, and parallel lines for proximity-based groups.')
-
-
