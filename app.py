@@ -1884,21 +1884,6 @@ with tab_maps:
 
 
 
-        st.markdown('<h4 style="color:#ffffff;margin:8px 0 4px 0;">Zone Heatmaps</h4>', unsafe_allow_html=True)
-
-        hm_panel_img, _, hm_panel_fig = draw_zone_heatmaps_panel(df_base)
-
-        st.image(hm_panel_img, use_column_width=True)
-
-        plt.close(hm_panel_fig)
-
-        st.markdown('<h4 style="color:#ffffff;margin:8px 0 4px 0;">Mini Maps - Top Conexões</h4>', unsafe_allow_html=True)
-
-        mini_img, _, mini_fig = draw_top_connection_minimaps(df_base, top_k=3)
-
-        st.image(mini_img, use_column_width=True)
-
-        plt.close(mini_fig)
 
 
 
@@ -1969,6 +1954,27 @@ with tab_maps:
             else:
 
                 st.warning('No video attached to this event.')
+
+
+    col_spacer, col_wide_maps = st.columns([0.95, 3.35], gap='large')
+
+    with col_wide_maps:
+
+        st.markdown('<h4 style="color:#ffffff;margin:8px 0 4px 0;">Zone Heatmaps</h4>', unsafe_allow_html=True)
+
+        hm_panel_img, _, hm_panel_fig = draw_zone_heatmaps_panel(df_base)
+
+        st.image(hm_panel_img, use_column_width=True)
+
+        plt.close(hm_panel_fig)
+
+        st.markdown('<h4 style="color:#ffffff;margin:8px 0 4px 0;">Mini Maps - Top Conexões</h4>', unsafe_allow_html=True)
+
+        mini_img, _, mini_fig = draw_top_connection_minimaps(df_base, top_k=3)
+
+        st.image(mini_img, use_column_width=True)
+
+        plt.close(mini_fig)
 
 
 
