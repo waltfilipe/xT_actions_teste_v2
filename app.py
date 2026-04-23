@@ -17,10 +17,12 @@ import textwrap
 try:
 
     from sklearn.cluster import KMeans
+    from sklearn.cluster import DBSCAN
 
 except Exception:
 
     KMeans = None
+    DBSCAN = None
 
 from PIL import Image
 
@@ -995,7 +997,15 @@ def draw_corridor_heatmap(df, title='Zone Heatmap - Completed Actions'):
     return Image.open(buf), ax, fig
 
 
-def draw_actions_clusters(df, title='Actions Clusters', max_clusters=6):
+def draw_actions_clusters(
+    df,
+    title='Actions Clusters',
+    method='DBSCAN',
+    dbscan_min_samples=3,
+    dbscan_eps=0.95,
+    kmeans_k=3,
+    min_cluster_size=4,
+):
 
     required_cols = ['x_start', 'y_start', 'x_end', 'y_end']
     dfc = df.dropna(subset=required_cols).copy()
@@ -1052,28 +1062,43 @@ def draw_actions_clusters(df, title='Actions Clusters', max_clusters=6):
     corridor_labels = {'left': 'Left Corridor', 'center': 'Center Corridor', 'right': 'Right Corridor'}
     clusters_meta = []
 
-    max_clusters = max(2, int(max_clusters))
+    min_cluster_size = max(2, int(min_cluster_size))
     cluster_global_id = 0
+    discarded_small = 0
+    discarded_outliers = 0
+
     for cname in corridor_order:
         part = dfc[dfc['corridor'] == cname].copy()
         if part.empty:
             continue
 
-        local_cap = max(1, min(3, max_clusters))
-        k_local = min(local_cluster_count(len(part), local_cap), len(part))
-        if k_local <= 1:
-            part['cluster_local'] = 0
+        features = build_features(part)
+        algo = str(method).strip().lower()
+
+        if algo.startswith('dbscan') and DBSCAN is not None and len(part) >= max(2, int(dbscan_min_samples)):
+            labels = DBSCAN(eps=float(dbscan_eps), min_samples=max(2, int(dbscan_min_samples))).fit_predict(features)
         else:
-            features = build_features(part)
-            if KMeans is not None:
-                part['cluster_local'] = KMeans(n_clusters=k_local, random_state=2147, n_init=10).fit_predict(features)
+            local_cap = max(1, min(3, int(kmeans_k)))
+            k_local = min(local_cluster_count(len(part), local_cap), len(part))
+            if k_local <= 1:
+                labels = np.zeros(len(part), dtype=int)
+            elif KMeans is not None:
+                labels = KMeans(n_clusters=k_local, random_state=2147, n_init=10).fit_predict(features)
             else:
                 ranks = pd.Series(features[:, 5] + features[:, 6]).rank(method='first')
-                part['cluster_local'] = pd.qcut(ranks, q=k_local, labels=False, duplicates='drop').astype(int).to_numpy()
+                labels = pd.qcut(ranks, q=k_local, labels=False, duplicates='drop').astype(int).to_numpy()
 
-        for local_idx in sorted(part['cluster_local'].unique()):
+        part['cluster_local'] = labels
+
+        for local_idx in sorted(pd.unique(part['cluster_local'])):
+            if int(local_idx) == -1:
+                discarded_outliers += int((part['cluster_local'] == local_idx).sum())
+                continue
             sub = part[part['cluster_local'] == local_idx].copy()
             if sub.empty:
+                continue
+            if len(sub) < min_cluster_size:
+                discarded_small += len(sub)
                 continue
             sub['cluster_id'] = cluster_global_id
             clusters_meta.append({
@@ -1088,8 +1113,16 @@ def draw_actions_clusters(df, title='Actions Clusters', max_clusters=6):
         fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
         fig.set_facecolor('#1a1a2e')
         fig.set_dpi(FIG_DPI)
-        ax.set_title(f'{title} (no clusters)', fontsize=12, color='#ffffff', pad=8)
-        ax.text(FIELD_X / 2, FIELD_Y / 2, 'No clusters available for this filter', color='#e5e7eb', fontsize=11, ha='center', va='center')
+        ax.set_title(f'{title} (no robust clusters)', fontsize=12, color='#ffffff', pad=8)
+        ax.text(
+            FIELD_X / 2,
+            FIELD_Y / 2,
+            f'No clusters >= {min_cluster_size} actions\nTry lower threshold or switch method',
+            color='#e5e7eb',
+            fontsize=10,
+            ha='center',
+            va='center',
+        )
         fig.tight_layout()
         fig.canvas.draw()
         buf = BytesIO()
@@ -1109,13 +1142,19 @@ def draw_actions_clusters(df, title='Actions Clusters', max_clusters=6):
         axes_flat = np.array([axes])
 
     cmap = plt.cm.get_cmap('tab10', max(3, k_total))
+    max_n = max(len(meta['df']) for meta in clusters_meta)
     for i, meta in enumerate(clusters_meta):
         ax = axes_flat[i]
         pitch.draw(ax=ax)
         ax.set_facecolor('#1a1a2e')
 
         part = meta['df']
+        n_part = len(part)
         color = cmap(meta['cluster_id'])
+        density = n_part / max_n if max_n > 0 else 1.0
+        alpha_lines = 0.10 + 0.28 * density
+        point_size = 8 + 28 * density
+        proto_size = 28 + 36 * density
 
         pitch.arrows(
             part['x_start'],
@@ -1123,13 +1162,15 @@ def draw_actions_clusters(df, title='Actions Clusters', max_clusters=6):
             part['x_end'],
             part['y_end'],
             color=color,
-            alpha=0.17,
+            alpha=alpha_lines,
             width=1.0,
             headwidth=3,
             headlength=4,
             ax=ax,
             zorder=2,
         )
+
+        pitch.scatter(part['x_start'], part['y_start'], s=point_size, color=color, alpha=alpha_lines * 0.9, ax=ax, zorder=3)
 
         sx = float(part['x_start'].mean())
         sy = float(part['y_start'].mean())
@@ -1138,7 +1179,7 @@ def draw_actions_clusters(df, title='Actions Clusters', max_clusters=6):
 
         pitch.arrows([sx], [sy], [ex], [ey], color='white', alpha=0.95, width=2.8, headwidth=6, headlength=6, ax=ax, zorder=4)
         pitch.arrows([sx], [sy], [ex], [ey], color=color, alpha=0.98, width=2.0, headwidth=5, headlength=5, ax=ax, zorder=5)
-        pitch.scatter([sx], [sy], s=38, color='white', edgecolors='#111111', linewidths=0.6, ax=ax, zorder=6)
+        pitch.scatter([sx], [sy], s=proto_size, color='white', edgecolors='#111111', linewidths=0.6, ax=ax, zorder=6)
 
         ax.set_title(
             f"Cluster {meta['cluster_id'] + 1} - {meta['corridor_label']} (n={len(part)})",
@@ -1150,7 +1191,13 @@ def draw_actions_clusters(df, title='Actions Clusters', max_clusters=6):
     for j in range(k_total, len(axes_flat)):
         axes_flat[j].axis('off')
 
-    fig.suptitle(f'{title} - Corridor-first clustering (k={k_total}, n={len(dfc)})', color='#ffffff', fontsize=12, y=0.995)
+    method_label = 'DBSCAN' if str(method).strip().lower().startswith('dbscan') else 'KMeans'
+    fig.suptitle(
+        f'{title} - {method_label} | clusters={k_total} | shown={sum(len(m["df"]) for m in clusters_meta)} | dropped small={discarded_small} | outliers={discarded_outliers}',
+        color='#ffffff',
+        fontsize=11,
+        y=0.995,
+    )
     fig.tight_layout(rect=[0, 0, 1, 0.985])
     fig.canvas.draw()
 
@@ -1500,7 +1547,21 @@ with tab_maps:
 
         )
 
-        cluster_max = st.slider('Max clusters', min_value=2, max_value=8, value=6, step=1)
+        cluster_method = st.selectbox('Method', ['DBSCAN (recommended)', 'KMeans (2-3 clusters)'], index=0)
+
+        col_c1, col_c2 = st.columns(2)
+
+        with col_c1:
+
+            dbscan_min_samples = st.slider('DBSCAN min_samples', min_value=2, max_value=4, value=3, step=1)
+
+        with col_c2:
+
+            dbscan_eps = st.slider('DBSCAN eps', min_value=0.60, max_value=1.60, value=0.95, step=0.05)
+
+        kmeans_k = st.slider('KMeans K (max 3)', min_value=2, max_value=3, value=3, step=1)
+
+        min_cluster_size = st.slider('Min actions per cluster (scout)', min_value=2, max_value=8, value=4, step=1)
 
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1664,7 +1725,15 @@ with tab_maps:
 
             title=f'Actions Clusters - {selected_match}',
 
-            max_clusters=int(cluster_max),
+            method='DBSCAN' if cluster_method.startswith('DBSCAN') else 'KMeans',
+
+            dbscan_min_samples=int(dbscan_min_samples),
+
+            dbscan_eps=float(dbscan_eps),
+
+            kmeans_k=int(kmeans_k),
+
+            min_cluster_size=int(min_cluster_size),
 
         )
 
@@ -1672,7 +1741,7 @@ with tab_maps:
 
         st.caption(
 
-            f'Cluster input: {cluster_source} | Rows used: {len(df_cluster)} | Corridor-first grouping for cleaner shape separation.'
+            f'Cluster input: {cluster_source} | Method: {cluster_method} | Rows used: {len(df_cluster)} | Density encoded by alpha/size.'
 
         )
 
