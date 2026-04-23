@@ -906,7 +906,7 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
     pitch = Pitch(pitch_type='statsbomb', pitch_color='#1a1a2e', line_color='#ffffff', line_alpha=0.95)
 
     # Slightly reduce figure height and use a compact bottom strip for arrow + legend.
-    fig, ax = pitch.draw(figsize=(11.2, 7.7))
+    fig, ax = pitch.draw(figsize=(9, 6))
 
     fig.set_facecolor('#1a1a2e')
 
