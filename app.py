@@ -782,19 +782,19 @@ def _draw_comet(ax, x0, y0, x1, y1, color, alpha, lw_scale):
 
         seg_alpha = alpha * (0.12 + 0.88 * t1)
 
-        seg_lw = 0.55 + lw_scale * t1
+        seg_lw = 0.90 + lw_scale * t1
 
         ax.plot([xa, xb], [ya, yb], color=color, linewidth=seg_lw, alpha=seg_alpha,
 
                 zorder=4, solid_capstyle='round')
 
-    start_size = 8.0 + 4.0 * alpha
+    start_size = 10.0 + 5.0 * alpha
 
     ax.scatter([x0], [y0], s=start_size, marker='o', c=[color],
 
                edgecolors='white', linewidths=0.35, alpha=max(0.12, alpha * 0.75), zorder=6)
 
-    end_size = 19.0 + 12.0 * alpha
+    end_size = 34.0 + 18.0 * alpha
 
     ax.scatter([x1], [y1], s=end_size, marker='h', c=[color],
 
@@ -806,21 +806,21 @@ def _action_visual(row, pos_ref):
 
     if not row['is_won']:
 
-        return '#e96a6a', 0.30, 1.15, 0
+        return '#aab2be', 0.22, 1.55, 0
 
     dxt = float(row['delta_xt_adj'])
 
     if dxt <= 0.0:
 
-        return '#b5becb', 0.14, 0.95, 1
+        return '#ffd64d', 0.08, 1.30, 1
 
     rel = float(np.clip(dxt / (pos_ref + 1e-9), 0.0, 1.0))
 
-    color = matplotlib.colors.to_hex(plt.cm.Blues(0.35 + 0.60 * rel))
+    color = matplotlib.colors.to_hex(plt.cm.YlOrRd(0.28 + 0.72 * rel))
 
-    alpha = 0.30 + 0.65 * rel
+    alpha = 0.34 + 0.62 * rel
 
-    lw_scale = 1.05 + 1.30 * rel
+    lw_scale = 1.70 + 2.10 * rel
 
     return color, alpha, lw_scale, 2
 
@@ -887,11 +887,11 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
     legend_items = [
 
-        ax.plot([], [], color=matplotlib.colors.to_hex(plt.cm.Blues(0.80)), lw=2.0, alpha=0.85, label='Successful (+deltaxT)')[0],
+        ax.plot([], [], color=matplotlib.colors.to_hex(plt.cm.YlOrRd(0.90)), lw=2.6, alpha=0.90, label='Successful (+deltaxT)')[0],
 
-        ax.plot([], [], color='#b5becb', lw=2.0, alpha=0.22, label='Successful (<=0 deltaxT)')[0],
+        ax.plot([], [], color='#ffd64d', lw=2.2, alpha=0.18, label='Successful (<=0 deltaxT)')[0],
 
-        ax.plot([], [], color='#e96a6a', lw=2.0, alpha=0.35, label='Failed')[0],
+        ax.plot([], [], color='#aab2be', lw=2.2, alpha=0.30, label='Failed')[0],
 
     ]
 
@@ -909,15 +909,15 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
 
 
-    sm = plt.cm.ScalarMappable(cmap=plt.cm.Blues, norm=Normalize(vmin=0.0, vmax=pos_ref))
+    sm = plt.cm.ScalarMappable(cmap=plt.cm.YlOrRd, norm=Normalize(vmin=0.0, vmax=pos_ref))
 
     cbar = fig.colorbar(sm, ax=ax, fraction=0.025, pad=0.01, shrink=0.72)
 
-    cbar.set_label('delta xT (+)', color='#cfe3ff', fontsize=7, labelpad=3)
+    cbar.set_label('delta xT (+)', color='#ffe6bf', fontsize=7, labelpad=3)
 
-    cbar.ax.yaxis.set_tick_params(color='#cfe3ff', labelsize=6)
+    cbar.ax.yaxis.set_tick_params(color='#ffe6bf', labelsize=6)
 
-    plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='#cfe3ff')
+    plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='#ffe6bf')
 
 
 
@@ -983,19 +983,24 @@ def draw_corridor_heatmap(df, title='Zone Heatmaps - Origin and Destination'):
 
     dest_counts = _zone_counts(df_s, 'x_end', 'y_end')
 
-    vmax = max(1, int(max(origin_counts.max(), dest_counts.max())))
-
     cmap_h = LinearSegmentedColormap.from_list('wr', ['#ffffff', '#ffecec', '#ffbfbf', '#ff8080', '#ff3b3b', '#ff0000'])
 
-    norm_h = Normalize(vmin=0, vmax=vmax)
+    norm_origin = Normalize(vmin=0, vmax=max(1, int(origin_counts.max())))
 
-    fig, axes = plt.subplots(1, 2, figsize=(FIG_W * 1.95, FIG_H), dpi=FIG_DPI)
+    norm_dest = Normalize(vmin=0, vmax=max(1, int(dest_counts.max())))
+
+    fig, axes = plt.subplots(1, 2, figsize=(FIG_W * 2.45, FIG_H * 1.22), dpi=FIG_DPI)
 
     fig.set_facecolor('#1a1a2e')
 
     pitch = Pitch(pitch_type='statsbomb', pitch_color='#1a1a2e', line_color='#ffffff', line_alpha=0.95)
 
-    for ax, counts, subtitle in zip(axes, [origin_counts, dest_counts], ['Origin Heatmap', 'Destination Heatmap']):
+    for ax, counts, norm_h, subtitle in zip(
+        axes,
+        [origin_counts, dest_counts],
+        [norm_origin, norm_dest],
+        ['Origin Heatmap', 'Destination Heatmap']
+    ):
 
         pitch.draw(ax=ax)
 
@@ -1019,11 +1024,13 @@ def draw_corridor_heatmap(df, title='Zone Heatmaps - Origin and Destination'):
 
                                        lw=0.6, alpha=0.92, zorder=2))
 
+                vmax_local = max(1, int(counts.max()))
+
                 ax.text((x0 + x1) / 2, (y0 + y1) / 2, str(val),
 
                         ha='center', va='center', zorder=4, fontsize=10,
 
-                        color='#ffffff' if val >= max(2, int(vmax * 0.35)) else '#1d1d1d',
+                        color='#ffffff' if val >= max(2, int(vmax_local * 0.35)) else '#1d1d1d',
 
                         fontweight='600')
 
@@ -1103,6 +1110,8 @@ def draw_zone_connections_map(df, title='Zone Connections - Origin to Destinatio
 
             y_cent = (y_bins[:-1] + y_bins[1:]) / 2.0
 
+            mid_label_offsets = defaultdict(int)
+
             for (ix0, iy0, ix1, iy1), cnt in top_links:
 
                 x0, y0 = float(x_cent[ix0]), float(y_cent[iy0])
@@ -1123,6 +1132,10 @@ def draw_zone_connections_map(df, title='Zone Connections - Origin to Destinatio
 
                                edgecolors='white', linewidths=0.45, alpha=alpha, zorder=5)
 
+                    ax.text(x0 + 1.4, y0 + 1.2, f'{cnt}', color='#e5efff', fontsize=8,
+                            ha='left', va='bottom', zorder=7,
+                            bbox=dict(boxstyle='round,pad=0.15', fc=(0.06, 0.09, 0.14, 0.75), ec='none'))
+
                     continue
 
                 rad = float(np.clip(0.08 * np.sign((ix1 - ix0) + 0.3 * (iy1 - iy0)), -0.25, 0.25))
@@ -1136,6 +1149,20 @@ def draw_zone_connections_map(df, title='Zone Connections - Origin to Destinatio
                                         lw=lw, color=color, alpha=alpha, zorder=4)
 
                 ax.add_patch(arrow)
+
+                mx = (x0 + x1) / 2.0
+
+                my = (y0 + y1) / 2.0
+
+                key = (round(mx, 1), round(my, 1))
+
+                bump = mid_label_offsets[key]
+
+                mid_label_offsets[key] += 1
+
+                ax.text(mx, my + 0.9 * bump, f'{cnt}', color='#e5efff', fontsize=8,
+                    ha='center', va='center', zorder=7,
+                    bbox=dict(boxstyle='round,pad=0.15', fc=(0.06, 0.09, 0.14, 0.75), ec='none'))
 
     ax.set_title(title, fontsize=11, color='#ffffff', pad=7)
 
@@ -1568,7 +1595,7 @@ with tab_maps:
 
         heat_img, _, hfig = draw_corridor_heatmap(df_base)
 
-        st.image(heat_img, width=DISPLAY_WIDTH)
+        st.image(heat_img, use_column_width=True)
 
         plt.close(hfig)
 
@@ -1578,7 +1605,7 @@ with tab_maps:
 
         conn_img, _, cfig = draw_zone_connections_map(df_base)
 
-        st.image(conn_img, width=DISPLAY_WIDTH)
+        st.image(conn_img, use_column_width=True)
 
         plt.close(cfig)
 
