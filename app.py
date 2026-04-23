@@ -903,7 +903,7 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
     pitch = Pitch(pitch_type='statsbomb', pitch_color='#1a1a2e', line_color='#ffffff', line_alpha=0.95)
 
-    fig, ax = pitch.draw(figsize=(FIG_W * 1.45, FIG_H * 1.22))
+    fig, ax = pitch.draw(figsize=(FIG_W * 1.60, FIG_H * 1.02))
 
     fig.set_facecolor('#1a1a2e')
 
@@ -1058,7 +1058,8 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
 
 
-    fig.tight_layout(rect=[0, 0.06, 1, 1])
+    # Keep the pitch area large while reserving just enough room for external legend.
+    fig.subplots_adjust(left=0.018, right=0.992, top=0.93, bottom=0.145)
 
     fig.canvas.draw()
 
@@ -1929,8 +1930,8 @@ with tab_maps:
                 st.write(f'**Start:** ({selected_action.x_start:.2f}, {selected_action.y_start:.2f})')
                 st.write(f'**End:** ({selected_action.x_end:.2f}, {selected_action.y_end:.2f})')
                 st.write(f'**Direction:** {selected_action["direction"].capitalize()}')
-            with c2:
                 st.write(f'**Successful:** {"Yes" if selected_action["is_won"] else "No"}')
+            with c2:
                 st.metric('Distance', f'{selected_action["action_distance"]:.1f}m')
                 st.metric('ΔxT', f'{selected_action["delta_xt_adj"]:.4f}')
 
