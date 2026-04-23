@@ -910,23 +910,29 @@ def draw_corridor_heatmap(df, title='Zone Heatmap - Completed Actions'):
 
     df_s = df[df['is_won']].copy()
 
-    # White -> soft pink -> red -> dark red for an elegant style.
+    x_bins = np.linspace(0, FIELD_X, 7)
 
-    cmap_h = LinearSegmentedColormap.from_list(
+    corridors = {'left': (LANE_LEFT_MIN, FIELD_Y), 'center': (LANE_RIGHT_MAX, LANE_LEFT_MIN), 'right': (0.0, LANE_RIGHT_MAX)}
 
-        'hex_heat',
+    counts = {}
 
-        ['#fffdfd', '#f9dede', '#f29a9a', '#d34646', '#7a0000'],
+    for cname, (y0, y1) in corridors.items():
 
-        N=256
+        arr = np.zeros(6, dtype=int)
 
-    )
+        for i in range(6):
 
-    # Keep pitch lines above the hexagons.
+            x0, x1 = x_bins[i], x_bins[i+1]
 
-    pitch = Pitch(pitch_type='statsbomb', pitch_color='#1a1a2e',
+            arr[i] = int(((df_s.x_end >= x0) & (df_s.x_end < x1) & (df_s.y_end >= y0) & (df_s.y_end < y1)).sum())
 
-                  line_color='#ffffff', line_alpha=0.35, line_zorder=3)
+        counts[cname] = arr
+
+
+
+    vmax = max(1, int(np.concatenate(list(counts.values())).max()))
+
+    pitch = Pitch(pitch_type='statsbomb', pitch_color='#1a1a2e', line_color='#ffffff', line_alpha=0.95)
 
     fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
 
@@ -936,57 +942,31 @@ def draw_corridor_heatmap(df, title='Zone Heatmap - Completed Actions'):
 
 
 
-    if not df_s.empty:
+    cmap_h = LinearSegmentedColormap.from_list('wr', ['#ffffff','#ffecec','#ffbfbf','#ff8080','#ff3b3b','#ff0000'])
 
-        # Fewer and larger hexagons with a balanced X/Y layout.
+    norm_h = Normalize(vmin=0, vmax=vmax)
 
-        hb = ax.hexbin(
-
-            df_s['x_end'],
-
-            df_s['y_end'],
-
-            gridsize=(12, 8),
-
-            cmap=cmap_h,
-
-            mincnt=1,
-
-            extent=[0, FIELD_X, 0, FIELD_Y],
-
-            alpha=0.90,
-
-            zorder=2,
-
-            linewidths=0.9,
-
-            edgecolors=(1, 1, 1, 0.18)
-
-        )
-
-        # Strict clipping: no hexagon can render outside the pitch area.
-
-        clip_rect = Rectangle((0, 0), FIELD_X, FIELD_Y, transform=ax.transData)
-
-        hb.set_clip_path(clip_rect)
+    thr = max(1, vmax * 0.35)
 
 
 
-    # Subtle guides to keep the visual language closer to v3.
+    for cname, (y0, y1) in corridors.items():
 
-    x_bins = np.linspace(0, FIELD_X, 7)
+        for i, val in enumerate(counts[cname]):
 
-    for x in x_bins[1:-1]:
+            x0, x1 = x_bins[i], x_bins[i+1]
 
-        ax.axvline(x=x, color='#ffffff', lw=0.45, alpha=0.08, linestyle='--', zorder=3)
+            ax.add_patch(Rectangle((x0, y0), x1-x0, y1-y0, facecolor=cmap_h(norm_h(val)), edgecolor=(1,1,1,0.12), lw=0.6, alpha=0.95, zorder=2))
 
-    ax.axhline(y=LANE_LEFT_MIN, color='#ffffff', lw=0.5, alpha=0.12, linestyle='--', zorder=3)
-
-    ax.axhline(y=LANE_RIGHT_MAX, color='#ffffff', lw=0.5, alpha=0.12, linestyle='--', zorder=3)
+            ax.text((x0+x1)/2, (y0+y1)/2, str(val), ha='center', va='center', zorder=4, fontsize=11, color='#000000' if val <= thr else '#ffffff', fontweight='700' if val >= vmax*0.5 else '600')
 
 
 
     ax.set_title(title, fontsize=12, color='#ffffff', pad=8)
+
+    ax.axhline(y=LANE_LEFT_MIN, color='#ffffff', lw=0.5, alpha=0.15, linestyle='--', zorder=3)
+
+    ax.axhline(y=LANE_RIGHT_MAX, color='#ffffff', lw=0.5, alpha=0.15, linestyle='--', zorder=3)
 
     fig.patches.append(FancyArrowPatch((0.44, 0.04), (0.54, 0.04), transform=fig.transFigure, arrowstyle='-|>', mutation_scale=13, linewidth=1.8, color='#cccccc'))
 
