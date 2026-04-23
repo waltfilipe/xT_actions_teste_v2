@@ -621,9 +621,9 @@ def compute_stats(df):
 
     failed_count = int(failed_mask.sum())
 
-    failed_xt_sum = float(df.loc[failed_mask, 'xt_start'].sum()) if failed_count else 0.0
+    failed_xt_sum = float(df.loc[failed_mask, 'xt_end'].sum()) if failed_count else 0.0
 
-    failed_xt_mean = float(df.loc[failed_mask, 'xt_start'].mean()) if failed_count else 0.0
+    failed_xt_mean = float(df.loc[failed_mask, 'xt_end'].mean()) if failed_count else 0.0
 
 
 
@@ -1010,28 +1010,28 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
     legend_items = [
 
         Line2D([0], [0], color=matplotlib.colors.to_hex(plt.cm.YlOrRd(0.90)), lw=2.8,
-               marker='h', markersize=7, markerfacecolor=matplotlib.colors.to_hex(plt.cm.YlOrRd(0.90)),
+               marker='h', markersize=9, markerfacecolor=matplotlib.colors.to_hex(plt.cm.YlOrRd(0.90)),
                markeredgecolor='white', markeredgewidth=0.6, alpha=0.96,
-               label='Successful (+delta xT)'),
+               label='Successful (+ΔxT)'),
 
         Line2D([0], [0], color='#ffd64d', lw=2.3,
-               marker='h', markersize=7, markerfacecolor='#ffd64d',
+               marker='h', markersize=9, markerfacecolor='#ffd64d',
                markeredgecolor='white', markeredgewidth=0.6, alpha=0.92,
-               label='Successful (<=0 delta xT)'),
+               label='Successful (≤0 ΔxT)'),
 
         Line2D([0], [0], color='#aab2be', lw=2.3,
-               marker='o', markersize=6.5, markerfacecolor='#aab2be',
+               marker='o', markersize=8, markerfacecolor='#aab2be',
                markeredgecolor='white', markeredgewidth=0.6, alpha=0.90,
                label='Failed'),
 
     ]
 
-    legend = ax.legend(handles=legend_items, loc='upper center', bbox_to_anchor=(0.5, -0.07),
+    legend = ax.legend(handles=legend_items, loc='upper center', bbox_to_anchor=(0.5, -0.11),
 
                        ncol=3, frameon=True, facecolor='#1a1a2e', edgecolor='#6b6b8f',
 
-                       fontsize='x-small', labelspacing=0.35, borderpad=0.55, handletextpad=0.55,
-                       columnspacing=1.5)
+                       fontsize='small', labelspacing=0.45, borderpad=0.70, handletextpad=0.65,
+                       columnspacing=1.8)
 
     for t in legend.get_texts():
 
@@ -1045,7 +1045,7 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
     cbar = fig.colorbar(sm, ax=ax, fraction=0.018, pad=0.01, shrink=0.72)
 
-    cbar.set_label('delta xT (+)', color='#ffe6bf', fontsize=8, labelpad=3)
+    cbar.set_label('ΔxT', color='#ffe6bf', fontsize=9, labelpad=3)
 
     cbar.ax.yaxis.set_tick_params(color='#ffe6bf', labelsize=7)
 
@@ -1053,20 +1053,20 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
     # tight_layout: rect reserves 11% at bottom for legend + arrow strip.
     # With figsize (12, 9) and this rect the available ratio ≈ 1.50, matching the pitch.
-    fig.tight_layout(rect=[0, 0.11, 1.0, 0.98])
+    fig.tight_layout(rect=[0, 0.14, 1.0, 0.98])
 
     # Place attack direction arrow/text AFTER tight_layout so positions are correct.
     fig.canvas.draw()
     ax_pos = ax.get_position()  # axes position in figure fraction
     cx = (ax_pos.x0 + ax_pos.x1) / 2
-    ay = ax_pos.y0 * 0.38
+    ay = ax_pos.y0 * 0.48
     fig.patches.append(FancyArrowPatch(
-        (cx - 0.05, ay), (cx + 0.05, ay),
+        (cx - 0.065, ay), (cx + 0.065, ay),
         transform=fig.transFigure, arrowstyle='-|>',
-        mutation_scale=13, linewidth=1.8, color='#cccccc'))
-    fig.text(cx, ay - 0.018, 'Attack Direction',
+        mutation_scale=16, linewidth=2.2, color='#cccccc'))
+    fig.text(cx, ay - 0.022, 'Attack Direction',
              ha='center', va='top', transform=fig.transFigure,
-             fontsize=8.5, color='#cccccc')
+             fontsize=11, color='#cccccc')
 
     buf = BytesIO()
 
@@ -2064,7 +2064,7 @@ with tab_stats:
 
             f1, f2 = st.columns(2)
 
-            with f1: small_metric('Σ xT Start (Failed)', f"{stats['failed_xt_sum']:.2f}")
+            with f1: small_metric('Σ xT End (Failed)', f"{stats['failed_xt_sum']:.2f}")
 
             with f2: small_metric('Avg. xT (Failed)', f"{stats['failed_xt_mean']:.2f}")
 
@@ -2086,7 +2086,7 @@ with tab_stats:
 
         'Avg. End xT': ('xt_end_mean', 'Avg. End xT'),
 
-        'Σ xT Start (Failed)': ('failed_xt_sum', 'Σ xT Start (Failed)'),
+        'Σ xT End (Failed)': ('failed_xt_sum', 'Σ xT End (Failed)'),
 
         'Avg. xT (Failed)': ('failed_xt_mean', 'Avg. xT (Failed)'),
 
