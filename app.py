@@ -906,33 +906,13 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
 
 
-def draw_corridor_heatmap(df, title='Zone Heatmap - Completed Actions'):
+def draw_corridor_heatmap(df, title='Heatmap de Zonas de Ação'):
 
     df_s = df[df['is_won']].copy()
 
-    x_bins = np.linspace(0, FIELD_X, 7)
+    
 
-    corridors = {'left': (LANE_LEFT_MIN, FIELD_Y), 'center': (LANE_RIGHT_MAX, LANE_LEFT_MIN), 'right': (0.0, LANE_RIGHT_MAX)}
-
-    counts = {}
-
-    for cname, (y0, y1) in corridors.items():
-
-        arr = np.zeros(6, dtype=int)
-
-        for i in range(6):
-
-            x0, x1 = x_bins[i], x_bins[i+1]
-
-            arr[i] = int(((df_s.x_end >= x0) & (df_s.x_end < x1) & (df_s.y_end >= y0) & (df_s.y_end < y1)).sum())
-
-        counts[cname] = arr
-
-
-
-    vmax = max(1, int(np.concatenate(list(counts.values())).max()))
-
-    pitch = Pitch(pitch_type='statsbomb', pitch_color='#1a1a2e', line_color='#ffffff', line_alpha=0.95)
+    pitch = Pitch(pitch_type='statsbomb', pitch_color='#1a1a2e', line_color='#ffffff', line_alpha=0.15)
 
     fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
 
@@ -942,31 +922,53 @@ def draw_corridor_heatmap(df, title='Zone Heatmap - Completed Actions'):
 
 
 
-    cmap_h = LinearSegmentedColormap.from_list('wr', ['#ffffff','#ffecec','#ffbfbf','#ff8080','#ff3b3b','#ff0000'])
+    if not df_s.empty:
 
-    norm_h = Normalize(vmin=0, vmax=vmax)
+        import seaborn as sns
 
-    thr = max(1, vmax * 0.35)
+        # Paleta de cores suave tipo plasma/magma, misturada com o fundo do campo
 
+        cmap_heatmap = LinearSegmentedColormap.from_list(
 
+            'custom_heatmap',
 
-    for cname, (y0, y1) in corridors.items():
+            [(0.0, '#1a1a2e'), (0.2, '#134074'), (0.5, '#CC2936'), (0.8, '#EBBF1A'), (1.0, '#FFFFFF')],
 
-        for i, val in enumerate(counts[cname]):
+            N=256
 
-            x0, x1 = x_bins[i], x_bins[i+1]
+        )
 
-            ax.add_patch(Rectangle((x0, y0), x1-x0, y1-y0, facecolor=cmap_h(norm_h(val)), edgecolor=(1,1,1,0.12), lw=0.6, alpha=0.95, zorder=2))
+        
 
-            ax.text((x0+x1)/2, (y0+y1)/2, str(val), ha='center', va='center', zorder=4, fontsize=11, color='#000000' if val <= thr else '#ffffff', fontweight='700' if val >= vmax*0.5 else '600')
+        sns.kdeplot(
+
+            x=df_s['x_end'],
+
+            y=df_s['y_end'],
+
+            ax=ax,
+
+            fill=True,
+
+            levels=100,
+
+            thresh=0.0,
+
+            cmap=cmap_heatmap,
+
+            alpha=0.8,
+
+            zorder=2,
+
+            clip=((0, FIELD_X), (0, FIELD_Y)),
+
+            bw_adjust=0.5
+
+        )
 
 
 
     ax.set_title(title, fontsize=12, color='#ffffff', pad=8)
-
-    ax.axhline(y=LANE_LEFT_MIN, color='#ffffff', lw=0.5, alpha=0.15, linestyle='--', zorder=3)
-
-    ax.axhline(y=LANE_RIGHT_MAX, color='#ffffff', lw=0.5, alpha=0.15, linestyle='--', zorder=3)
 
     fig.patches.append(FancyArrowPatch((0.44, 0.04), (0.54, 0.04), transform=fig.transFigure, arrowstyle='-|>', mutation_scale=13, linewidth=1.8, color='#cccccc'))
 
