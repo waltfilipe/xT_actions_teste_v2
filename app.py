@@ -621,9 +621,11 @@ def compute_stats(df):
 
     failed_count = int(failed_mask.sum())
 
-    failed_xt_sum = float(df.loc[failed_mask, 'xt_end'].sum()) if failed_count else 0.0
+    # Invert xt_end: losing ball far from opponent goal (low xt_end) → higher exposure value.
+    failed_xt_inv = (1.0 - df.loc[failed_mask, 'xt_end']) if failed_count else pd.Series([], dtype=float)
+    failed_xt_sum = float(failed_xt_inv.sum()) if failed_count else 0.0
 
-    failed_xt_mean = float(df.loc[failed_mask, 'xt_end'].mean()) if failed_count else 0.0
+    failed_xt_mean = float(failed_xt_inv.mean()) if failed_count else 0.0
 
 
 
@@ -903,14 +905,12 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
     pitch = Pitch(pitch_type='statsbomb', pitch_color='#1a1a2e', line_color='#ffffff', line_alpha=0.95)
 
-    # figsize ratio ≈ 1.5 (matches 120×80 statsbomb pitch); extra height for external legend
-    fig, ax = pitch.draw(figsize=(12.0, 9.0))
+    # figsize: 12×8.6 keeps ~3:2 pitch ratio while leaving a slim strip for legend+arrow
+    fig, ax = pitch.draw(figsize=(12.0, 8.6))
 
     fig.set_facecolor('#1a1a2e')
 
     fig.set_dpi(150)
-
-    ax.axvline(x=FINAL_THIRD_LINE_X, color='#FFD54F', lw=1.0, alpha=0.20)
 
     ax.axvline(x=HALF_LINE_X, color='#ffffff', lw=0.6, alpha=0.12, linestyle='--')
 
@@ -1026,7 +1026,7 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
     ]
 
-    legend = ax.legend(handles=legend_items, loc='upper center', bbox_to_anchor=(0.5, -0.11),
+    legend = ax.legend(handles=legend_items, loc='upper center', bbox_to_anchor=(0.5, -0.06),
 
                        ncol=3, frameon=True, facecolor='#1a1a2e', edgecolor='#6b6b8f',
 
@@ -1051,22 +1051,22 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
     plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='#ffe6bf')
 
-    # tight_layout: rect reserves 11% at bottom for legend + arrow strip.
-    # With figsize (12, 9) and this rect the available ratio ≈ 1.50, matching the pitch.
-    fig.tight_layout(rect=[0, 0.14, 1.0, 0.98])
+    # tight_layout: reserve just enough at bottom for legend + arrow.
+    fig.tight_layout(rect=[0, 0.08, 1.0, 0.98])
 
     # Place attack direction arrow/text AFTER tight_layout so positions are correct.
     fig.canvas.draw()
     ax_pos = ax.get_position()  # axes position in figure fraction
     cx = (ax_pos.x0 + ax_pos.x1) / 2
-    ay = ax_pos.y0 * 0.48
+    # Place arrow/text centred in the strip below the axes
+    strip_mid = ax_pos.y0 * 0.40
     fig.patches.append(FancyArrowPatch(
-        (cx - 0.065, ay), (cx + 0.065, ay),
+        (cx - 0.06, strip_mid), (cx + 0.06, strip_mid),
         transform=fig.transFigure, arrowstyle='-|>',
-        mutation_scale=16, linewidth=2.2, color='#cccccc'))
-    fig.text(cx, ay - 0.022, 'Attack Direction',
+        mutation_scale=15, linewidth=2.0, color='#cccccc'))
+    fig.text(cx, strip_mid - 0.020, 'Attack Direction',
              ha='center', va='top', transform=fig.transFigure,
-             fontsize=11, color='#cccccc')
+             fontsize=10, color='#cccccc')
 
     buf = BytesIO()
 
@@ -2105,3 +2105,5 @@ with tab_stats:
 
 
     st.caption('Mapping: origin (ring), destination (diamond), color by xT End, and parallel lines for proximity-based groups.')
+
+
