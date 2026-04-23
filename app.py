@@ -788,11 +788,17 @@ def _draw_comet(ax, x0, y0, x1, y1, color, alpha, lw_scale):
 
                 zorder=4, solid_capstyle='round')
 
-    end_size = 16.0 + 10.0 * alpha
+    start_size = 8.0 + 4.0 * alpha
 
-    ax.scatter([x1], [y1], s=end_size, marker='o', c=[color],
+    ax.scatter([x0], [y0], s=start_size, marker='o', c=[color],
 
-               edgecolors='white', linewidths=0.4, alpha=min(1.0, alpha + 0.15), zorder=6)
+               edgecolors='white', linewidths=0.35, alpha=max(0.12, alpha * 0.75), zorder=6)
+
+    end_size = 19.0 + 12.0 * alpha
+
+    ax.scatter([x1], [y1], s=end_size, marker='h', c=[color],
+
+               edgecolors='white', linewidths=0.45, alpha=min(1.0, alpha + 0.15), zorder=7)
 
 
 
@@ -903,6 +909,18 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
 
 
+    sm = plt.cm.ScalarMappable(cmap=plt.cm.Blues, norm=Normalize(vmin=0.0, vmax=pos_ref))
+
+    cbar = fig.colorbar(sm, ax=ax, fraction=0.025, pad=0.01, shrink=0.72)
+
+    cbar.set_label('delta xT (+)', color='#cfe3ff', fontsize=7, labelpad=3)
+
+    cbar.ax.yaxis.set_tick_params(color='#cfe3ff', labelsize=6)
+
+    plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='#cfe3ff')
+
+
+
     fig.patches.append(FancyArrowPatch((0.44, 0.04), (0.54, 0.04), transform=fig.transFigure, arrowstyle='-|>', mutation_scale=13, linewidth=1.8, color='#cccccc'))
 
     fig.text(0.49, 0.015, 'Attack Direction', ha='center', va='center', fontsize=8, color='#cccccc')
@@ -923,33 +941,121 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
 
 
-def draw_corridor_heatmap(df, title='Zone Heatmap - Completed Actions'):
-
-    df_s = df[df['is_won']].copy()
+def _zone_bins():
 
     x_bins = np.linspace(0, FIELD_X, 7)
 
-    corridors = {'left': (LANE_LEFT_MIN, FIELD_Y), 'center': (LANE_RIGHT_MAX, LANE_LEFT_MIN), 'right': (0.0, LANE_RIGHT_MAX)}
+    y_bins = np.array([0.0, LANE_RIGHT_MAX, LANE_LEFT_MIN, FIELD_Y])
 
-    counts = {}
-
-    for cname, (y0, y1) in corridors.items():
-
-        arr = np.zeros(6, dtype=int)
-
-        for i in range(6):
-
-            x0, x1 = x_bins[i], x_bins[i+1]
-
-            arr[i] = int(((df_s.x_end >= x0) & (df_s.x_end < x1) & (df_s.y_end >= y0) & (df_s.y_end < y1)).sum())
-
-        counts[cname] = arr
+    return x_bins, y_bins
 
 
 
-    vmax = max(1, int(np.concatenate(list(counts.values())).max()))
+def _zone_counts(df_s, x_col, y_col):
+
+    x_bins, y_bins = _zone_bins()
+
+    counts = np.zeros((3, 6), dtype=int)
+
+    if df_s.empty:
+
+        return counts
+
+    ix = np.clip(np.searchsorted(x_bins, df_s[x_col].to_numpy(), side='right') - 1, 0, 5)
+
+    iy = np.clip(np.searchsorted(y_bins, df_s[y_col].to_numpy(), side='right') - 1, 0, 2)
+
+    for cx, cy in zip(ix, iy):
+
+        counts[cy, cx] += 1
+
+    return counts
+
+
+
+def draw_corridor_heatmap(df, title='Zone Heatmaps - Origin and Destination'):
+
+    df_s = df[df['is_won']].copy()
+
+    x_bins, y_bins = _zone_bins()
+
+    origin_counts = _zone_counts(df_s, 'x_start', 'y_start')
+
+    dest_counts = _zone_counts(df_s, 'x_end', 'y_end')
+
+    vmax = max(1, int(max(origin_counts.max(), dest_counts.max())))
+
+    cmap_h = LinearSegmentedColormap.from_list('wr', ['#ffffff', '#ffecec', '#ffbfbf', '#ff8080', '#ff3b3b', '#ff0000'])
+
+    norm_h = Normalize(vmin=0, vmax=vmax)
+
+    fig, axes = plt.subplots(1, 2, figsize=(FIG_W * 1.95, FIG_H), dpi=FIG_DPI)
+
+    fig.set_facecolor('#1a1a2e')
 
     pitch = Pitch(pitch_type='statsbomb', pitch_color='#1a1a2e', line_color='#ffffff', line_alpha=0.95)
+
+    for ax, counts, subtitle in zip(axes, [origin_counts, dest_counts], ['Origin Heatmap', 'Destination Heatmap']):
+
+        pitch.draw(ax=ax)
+
+        for row in range(3):
+
+            for col in range(6):
+
+                x0, x1 = x_bins[col], x_bins[col + 1]
+
+                y0, y1 = y_bins[row], y_bins[row + 1]
+
+                val = int(counts[row, col])
+
+                if val == 0:
+
+                    continue
+
+                ax.add_patch(Rectangle((x0, y0), x1 - x0, y1 - y0,
+
+                                       facecolor=cmap_h(norm_h(val)), edgecolor=(1, 1, 1, 0.12),
+
+                                       lw=0.6, alpha=0.92, zorder=2))
+
+                ax.text((x0 + x1) / 2, (y0 + y1) / 2, str(val),
+
+                        ha='center', va='center', zorder=4, fontsize=10,
+
+                        color='#ffffff' if val >= max(2, int(vmax * 0.35)) else '#1d1d1d',
+
+                        fontweight='600')
+
+        ax.set_title(subtitle, fontsize=11, color='#ffffff', pad=6)
+
+        ax.axhline(y=LANE_LEFT_MIN, color='#ffffff', lw=0.5, alpha=0.12, linestyle='--', zorder=3)
+
+        ax.axhline(y=LANE_RIGHT_MAX, color='#ffffff', lw=0.5, alpha=0.12, linestyle='--', zorder=3)
+
+    fig.suptitle(title, fontsize=12, color='#ffffff', y=0.98)
+
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+
+    fig.canvas.draw()
+
+    buf = BytesIO()
+
+    fig.savefig(buf, format='png', dpi=FIG_DPI, facecolor=fig.get_facecolor())
+
+    buf.seek(0)
+
+    return Image.open(buf), axes, fig
+
+
+
+def draw_zone_connections_map(df, title='Zone Connections - Origin to Destination'):
+
+    df_s = df[df['is_won']].copy()
+
+    x_bins, y_bins = _zone_bins()
+
+    pitch = Pitch(pitch_type='statsbomb', pitch_color='#1a1a2e', line_color='#ffffff', line_alpha=0.92)
 
     fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
 
@@ -957,39 +1063,81 @@ def draw_corridor_heatmap(df, title='Zone Heatmap - Completed Actions'):
 
     fig.set_dpi(FIG_DPI)
 
+    for row in range(3):
 
+        for col in range(6):
 
-    cmap_h = LinearSegmentedColormap.from_list('wr', ['#ffffff','#ffecec','#ffbfbf','#ff8080','#ff3b3b','#ff0000'])
+            x0, x1 = x_bins[col], x_bins[col + 1]
 
-    norm_h = Normalize(vmin=0, vmax=vmax)
+            y0, y1 = y_bins[row], y_bins[row + 1]
 
-    thr = max(1, vmax * 0.35)
+            ax.add_patch(Rectangle((x0, y0), x1 - x0, y1 - y0,
 
+                                   facecolor=(0.32, 0.46, 0.68, 0.04), edgecolor=(1, 1, 1, 0.07),
 
+                                   lw=0.5, zorder=1))
 
-    for cname, (y0, y1) in corridors.items():
+    if not df_s.empty:
 
-        for i, val in enumerate(counts[cname]):
+        sx = np.clip(np.searchsorted(x_bins, df_s['x_start'].to_numpy(), side='right') - 1, 0, 5)
 
-            x0, x1 = x_bins[i], x_bins[i+1]
+        sy = np.clip(np.searchsorted(y_bins, df_s['y_start'].to_numpy(), side='right') - 1, 0, 2)
 
-            ax.add_patch(Rectangle((x0, y0), x1-x0, y1-y0, facecolor=cmap_h(norm_h(val)), edgecolor=(1,1,1,0.12), lw=0.6, alpha=0.95, zorder=2))
+        ex = np.clip(np.searchsorted(x_bins, df_s['x_end'].to_numpy(), side='right') - 1, 0, 5)
 
-            ax.text((x0+x1)/2, (y0+y1)/2, str(val), ha='center', va='center', zorder=4, fontsize=11, color='#000000' if val <= thr else '#ffffff', fontweight='700' if val >= vmax*0.5 else '600')
+        ey = np.clip(np.searchsorted(y_bins, df_s['y_end'].to_numpy(), side='right') - 1, 0, 2)
 
+        transitions = defaultdict(int)
 
+        for a, b, c, d in zip(sx, sy, ex, ey):
 
-    ax.set_title(title, fontsize=12, color='#ffffff', pad=8)
+            transitions[(int(a), int(b), int(c), int(d))] += 1
 
-    ax.axhline(y=LANE_LEFT_MIN, color='#ffffff', lw=0.5, alpha=0.15, linestyle='--', zorder=3)
+        top_links = sorted(transitions.items(), key=lambda kv: kv[1], reverse=True)[:14]
 
-    ax.axhline(y=LANE_RIGHT_MAX, color='#ffffff', lw=0.5, alpha=0.15, linestyle='--', zorder=3)
+        if top_links:
 
-    fig.patches.append(FancyArrowPatch((0.44, 0.04), (0.54, 0.04), transform=fig.transFigure, arrowstyle='-|>', mutation_scale=13, linewidth=1.8, color='#cccccc'))
+            max_link = max(v for _, v in top_links)
 
-    fig.text(0.49, 0.015, 'Attack Direction', ha='center', va='center', fontsize=8, color='#cccccc')
+            x_cent = (x_bins[:-1] + x_bins[1:]) / 2.0
 
+            y_cent = (y_bins[:-1] + y_bins[1:]) / 2.0
 
+            for (ix0, iy0, ix1, iy1), cnt in top_links:
+
+                x0, y0 = float(x_cent[ix0]), float(y_cent[iy0])
+
+                x1, y1 = float(x_cent[ix1]), float(y_cent[iy1])
+
+                rel = cnt / max_link
+
+                color = plt.cm.Blues(0.35 + 0.60 * rel)
+
+                lw = 0.8 + 3.8 * rel
+
+                alpha = 0.22 + 0.56 * rel
+
+                if ix0 == ix1 and iy0 == iy1:
+
+                    ax.scatter([x0], [y0], s=34 + 50 * rel, c=[color], marker='o',
+
+                               edgecolors='white', linewidths=0.45, alpha=alpha, zorder=5)
+
+                    continue
+
+                rad = float(np.clip(0.08 * np.sign((ix1 - ix0) + 0.3 * (iy1 - iy0)), -0.25, 0.25))
+
+                arrow = FancyArrowPatch((x0, y0), (x1, y1),
+
+                                        connectionstyle=f'arc3,rad={rad}',
+
+                                        arrowstyle='-|>', mutation_scale=8 + 8 * rel,
+
+                                        lw=lw, color=color, alpha=alpha, zorder=4)
+
+                ax.add_patch(arrow)
+
+    ax.set_title(title, fontsize=11, color='#ffffff', pad=7)
 
     fig.tight_layout()
 
@@ -1378,21 +1526,7 @@ with tab_maps:
 
         DISPLAY_WIDTH = 760
 
-
-
-        if st.button('Clear zone filter', key='clear_heat_filter'):
-
-            st.session_state['heat_selection'] = None
-
-
-
         df_to_draw = df_base
-
-        if st.session_state['heat_selection'] is not None:
-
-            sel = st.session_state['heat_selection']
-
-            df_to_draw = df_base[(df_base.x_end >= sel['x0']) & (df_base.x_end < sel['x1']) & (df_base.y_end >= sel['y0']) & (df_base.y_end < sel['y1'])].reset_index(drop=True)
 
 
 
@@ -1432,55 +1566,21 @@ with tab_maps:
 
         st.markdown('<h4 style="color:#ffffff;margin:8px 0 4px 0;">Zone Heatmap</h4>', unsafe_allow_html=True)
 
-        heat_img, hax, hfig = draw_corridor_heatmap(df_base)
+        heat_img, _, hfig = draw_corridor_heatmap(df_base)
 
-        heat_click = streamlit_image_coordinates(heat_img, width=DISPLAY_WIDTH)
-
-
-
-        if heat_click is not None:
-
-            rw, rh = heat_img.size
-
-            px = heat_click['x'] * (rw / heat_click['width'])
-
-            py = heat_click['y'] * (rh / heat_click['height'])
-
-            fx, fy = hax.transData.inverted().transform((px, rh - py))
-
-            xb = np.linspace(0, FIELD_X, 7)
-
-            ix = max(0, min(5, np.searchsorted(xb, fx, side='right') - 1))
-
-            x0, x1 = xb[ix], xb[ix+1]
-
-            if fy >= LANE_LEFT_MIN:
-
-                cn, y0, y1 = 'left', LANE_LEFT_MIN, FIELD_Y
-
-            elif fy < LANE_RIGHT_MAX:
-
-                cn, y0, y1 = 'right', 0.0, LANE_RIGHT_MAX
-
-            else:
-
-                cn, y0, y1 = 'center', LANE_RIGHT_MAX, LANE_LEFT_MIN
-
-            st.session_state['heat_selection'] = {'ix': int(ix), 'corridor': cn, 'x0': float(x0), 'x1': float(x1), 'y0': float(y0), 'y1': float(y1)}
-
-
+        st.image(heat_img, width=DISPLAY_WIDTH)
 
         plt.close(hfig)
 
+        st.markdown('<h4 style="color:#ffffff;margin:8px 0 4px 0;">Conexão de Zonas</h4>', unsafe_allow_html=True)
 
+        st.caption('Protótipo inicial: conexões mais frequentes entre zonas de origem e destino, com espessura e intensidade pela frequência.')
 
-        if st.session_state['heat_selection'] is not None:
+        conn_img, _, cfig = draw_zone_connections_map(df_base)
 
-            sel = st.session_state['heat_selection']
+        st.image(conn_img, width=DISPLAY_WIDTH)
 
-            smsk = ((df_base.x_end >= sel['x0']) & (df_base.x_end < sel['x1']) & (df_base.y_end >= sel['y0']) & (df_base.y_end < sel['y1']))
-
-            st.markdown(f"<div style='color:#ffffff;margin-top:4px;'><strong>Filter:</strong> corridor <code>{sel['corridor']}</code>, X column #{sel['ix']+1} - {int(smsk.sum())} actions</div>", unsafe_allow_html=True)
+        plt.close(cfig)
 
 
 
