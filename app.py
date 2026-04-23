@@ -14,6 +14,14 @@ import numpy as np
 
 import textwrap
 
+try:
+
+    from sklearn.cluster import KMeans
+
+except Exception:
+
+    KMeans = None
+
 from PIL import Image
 
 from io import BytesIO
@@ -987,6 +995,159 @@ def draw_corridor_heatmap(df, title='Zone Heatmap - Completed Actions'):
     return Image.open(buf), ax, fig
 
 
+def draw_actions_clusters(df, title='Actions Clusters', max_clusters=6):
+
+    required_cols = ['x_start', 'y_start', 'x_end', 'y_end']
+
+    dfc = df.dropna(subset=required_cols).copy()
+
+
+
+    pitch = Pitch(pitch_type='statsbomb', pitch_color='#1a1a2e', line_color='#ffffff', line_alpha=0.95)
+
+    fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
+
+    fig.set_facecolor('#1a1a2e')
+
+    fig.set_dpi(FIG_DPI)
+
+
+
+    if len(dfc) < 2:
+
+        ax.set_title(f'{title} (insufficient data)', fontsize=12, color='#ffffff', pad=8)
+
+        ax.text(FIELD_X / 2, FIELD_Y / 2, 'Need at least 2 actions to cluster', color='#e5e7eb', fontsize=11, ha='center', va='center')
+
+    else:
+
+        dfc['angle'] = np.arctan2(dfc['y_end'] - dfc['y_start'], dfc['x_end'] - dfc['x_start'])
+
+        features = dfc[['x_start', 'y_start', 'x_end', 'y_end', 'angle']].to_numpy(dtype=float)
+
+
+
+        k = max(2, min(int(max_clusters), len(dfc)))
+
+        if KMeans is not None:
+
+            labels = KMeans(n_clusters=k, random_state=2147, n_init=10).fit_predict(features)
+
+        else:
+
+            # Fallback when scikit-learn is unavailable: angle buckets mimic route grouping.
+
+            labels = pd.qcut(dfc['angle'].rank(method='first'), q=k, labels=False, duplicates='drop').astype(int).to_numpy()
+
+            k = int(np.unique(labels).size)
+
+
+
+        dfc['cluster'] = labels
+
+        cmap = plt.cm.get_cmap('tab10', k)
+
+
+
+        for cl in sorted(dfc['cluster'].unique()):
+
+            part = dfc[dfc['cluster'] == cl]
+
+            color = cmap(int(cl))
+
+            pitch.arrows(
+
+                part['x_start'],
+
+                part['y_start'],
+
+                part['x_end'],
+
+                part['y_end'],
+
+                color=color,
+
+                alpha=0.45,
+
+                width=1.5,
+
+                headwidth=4,
+
+                headlength=5,
+
+                ax=ax,
+
+                zorder=3,
+
+            )
+
+            pitch.scatter(part['x_start'], part['y_start'], s=11, color=color, alpha=0.35, ax=ax, zorder=4)
+
+
+
+        ax.set_title(f'{title} (k={k}, n={len(dfc)})', fontsize=12, color='#ffffff', pad=8)
+
+        legend_items = [
+
+            ax.plot([], [], color=cmap(i), linewidth=3, label=f'Cluster {i + 1}')[0]
+
+            for i in range(k)
+
+        ]
+
+        legend = ax.legend(
+
+            handles=legend_items,
+
+            loc='upper left',
+
+            bbox_to_anchor=(0.01, 0.99),
+
+            frameon=True,
+
+            facecolor='#1a1a2e',
+
+            edgecolor='#444466',
+
+            fontsize='xx-small',
+
+            ncol=2,
+
+            labelspacing=0.35,
+
+            borderpad=0.45,
+
+            handletextpad=0.4,
+
+        )
+
+        for t in legend.get_texts():
+
+            t.set_color('white')
+
+        legend.get_frame().set_alpha(0.90)
+
+
+
+    fig.patches.append(FancyArrowPatch((0.44, 0.04), (0.54, 0.04), transform=fig.transFigure, arrowstyle='-|>', mutation_scale=13, linewidth=1.8, color='#cccccc'))
+
+    fig.text(0.49, 0.015, 'Attack Direction', ha='center', va='center', fontsize=8, color='#cccccc')
+
+
+
+    fig.tight_layout()
+
+    fig.canvas.draw()
+
+    buf = BytesIO()
+
+    fig.savefig(buf, format='png', dpi=FIG_DPI, facecolor=fig.get_facecolor())
+
+    buf.seek(0)
+
+    return Image.open(buf), ax, fig
+
+
 
 def render_top10(df, title='Top 10 - ΔxT (Adj.) and xT End'):
 
@@ -1454,6 +1615,16 @@ with tab_maps:
 
 
         plt.close(hfig)
+
+
+
+        st.markdown('<h4 style="color:#ffffff;margin:8px 0 4px 0;">Actions Clusters</h4>', unsafe_allow_html=True)
+
+        cl_img, _, cl_fig = draw_actions_clusters(df_to_draw, title=f'Actions Clusters - {selected_match}')
+
+        st.image(cl_img, width=DISPLAY_WIDTH)
+
+        plt.close(cl_fig)
 
 
 
