@@ -903,11 +903,12 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
     pitch = Pitch(pitch_type='statsbomb', pitch_color='#1a1a2e', line_color='#ffffff', line_alpha=0.95)
 
-    fig, ax = pitch.draw(figsize=(FIG_W * 1.60, FIG_H * 1.02))
+    # figsize ratio ≈ 1.5 (matches 120×80 statsbomb pitch); extra height for external legend
+    fig, ax = pitch.draw(figsize=(12.0, 9.0))
 
     fig.set_facecolor('#1a1a2e')
 
-    fig.set_dpi(FIG_DPI)
+    fig.set_dpi(150)
 
     ax.axvline(x=FINAL_THIRD_LINE_X, color='#FFD54F', lw=1.0, alpha=0.20)
 
@@ -1042,30 +1043,34 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
     sm = plt.cm.ScalarMappable(cmap=plt.cm.YlOrRd, norm=Normalize(vmin=0.0, vmax=pos_ref))
 
-    cbar = fig.colorbar(sm, ax=ax, fraction=0.025, pad=0.01, shrink=0.72)
+    cbar = fig.colorbar(sm, ax=ax, fraction=0.018, pad=0.01, shrink=0.72)
 
-    cbar.set_label('delta xT (+)', color='#ffe6bf', fontsize=7, labelpad=3)
+    cbar.set_label('delta xT (+)', color='#ffe6bf', fontsize=8, labelpad=3)
 
-    cbar.ax.yaxis.set_tick_params(color='#ffe6bf', labelsize=6)
+    cbar.ax.yaxis.set_tick_params(color='#ffe6bf', labelsize=7)
 
     plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='#ffe6bf')
 
+    # tight_layout: rect reserves 11% at bottom for legend + arrow strip.
+    # With figsize (12, 9) and this rect the available ratio ≈ 1.50, matching the pitch.
+    fig.tight_layout(rect=[0, 0.11, 1.0, 0.98])
 
-
-    fig.patches.append(FancyArrowPatch((0.44, 0.04), (0.54, 0.04), transform=fig.transFigure, arrowstyle='-|>', mutation_scale=13, linewidth=1.8, color='#cccccc'))
-
-    fig.text(0.49, 0.015, 'Attack Direction', ha='center', va='center', fontsize=8, color='#cccccc')
-
-
-
-    # Keep the pitch area large while reserving just enough room for external legend.
-    fig.subplots_adjust(left=0.018, right=0.992, top=0.93, bottom=0.145)
-
+    # Place attack direction arrow/text AFTER tight_layout so positions are correct.
     fig.canvas.draw()
+    ax_pos = ax.get_position()  # axes position in figure fraction
+    cx = (ax_pos.x0 + ax_pos.x1) / 2
+    ay = ax_pos.y0 * 0.38
+    fig.patches.append(FancyArrowPatch(
+        (cx - 0.05, ay), (cx + 0.05, ay),
+        transform=fig.transFigure, arrowstyle='-|>',
+        mutation_scale=13, linewidth=1.8, color='#cccccc'))
+    fig.text(cx, ay - 0.018, 'Attack Direction',
+             ha='center', va='top', transform=fig.transFigure,
+             fontsize=8.5, color='#cccccc')
 
     buf = BytesIO()
 
-    fig.savefig(buf, format='png', dpi=FIG_DPI, facecolor=fig.get_facecolor())
+    fig.savefig(buf, format='png', dpi=150, facecolor=fig.get_facecolor())
 
     buf.seek(0)
 
