@@ -621,7 +621,6 @@ def compute_stats(df):
 
     failed_count = int(failed_mask.sum())
 
-    # Invert xt_end: losing ball far from opponent goal (low xt_end) → higher exposure value.
     failed_xt_inv = (1.0 - df.loc[failed_mask, 'xt_end']) if failed_count else pd.Series([], dtype=float)
     failed_xt_sum = float(failed_xt_inv.sum()) if failed_count else 0.0
 
@@ -905,8 +904,7 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
     pitch = Pitch(pitch_type='statsbomb', pitch_color='#1a1a2e', line_color='#ffffff', line_alpha=0.95)
 
-    # Pitch fills nearly all the figure; only a slim strip at bottom for arrow + legend.
-    fig, ax = pitch.draw(figsize=(11.5, 7.2))
+    fig, ax = pitch.draw(figsize=(9.6, 7.2))
 
     fig.set_facecolor('#1a1a2e')
 
@@ -990,7 +988,6 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
 
 
-    # Draw by priority so higher xT actions naturally overlay lower ones.
     draw_order = sorted(range(len(df)), key=lambda i: (int(_action_visual(df.iloc[i], pos_ref)[3]), float(scores[i])))
 
     rows = list(df.iterrows())
@@ -1051,14 +1048,11 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
     plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='#ffe6bf')
 
-    # Pull the axes to fill nearly the whole figure; leave only what's needed below for arrow+legend.
-    fig.subplots_adjust(left=0.01, right=0.955, top=0.975, bottom=0.17)
+    fig.subplots_adjust(left=0.01, right=0.92, top=0.975, bottom=0.17)
 
-    # Place attack direction arrow/text AFTER subplots_adjust so positions are final.
     fig.canvas.draw()
-    ax_pos = ax.get_position()  # axes position in figure fraction
+    ax_pos = ax.get_position()
     cx = (ax_pos.x0 + ax_pos.x1) / 2
-    # Arrow sits just below the pitch bottom edge.
     strip_mid = ax_pos.y0 - 0.016
     fig.patches.append(FancyArrowPatch(
         (cx - 0.055, strip_mid), (cx + 0.055, strip_mid),
@@ -1070,7 +1064,7 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
     buf = BytesIO()
 
-    fig.savefig(buf, format='png', dpi=150, facecolor=fig.get_facecolor())
+    fig.savefig(buf, format='png', dpi=150, facecolor=fig.get_facecolor(), bbox_inches='tight')
 
     buf.seek(0)
 
@@ -1178,7 +1172,7 @@ def draw_single_zone_heatmap(df, mode='origin', title='Zone Heatmap'):
 
     buf = BytesIO()
 
-    fig.savefig(buf, format='png', dpi=FIG_DPI, facecolor=fig.get_facecolor())
+    fig.savefig(buf, format='png', dpi=FIG_DPI, facecolor=fig.get_facecolor(), bbox_inches='tight')
 
     buf.seek(0)
 
@@ -1256,7 +1250,7 @@ def draw_zone_heatmaps_panel(df, title='Zone Heatmaps - Origin and Destination')
 
     buf = BytesIO()
 
-    fig.savefig(buf, format='png', dpi=FIG_DPI, facecolor=fig.get_facecolor())
+    fig.savefig(buf, format='png', dpi=FIG_DPI, facecolor=fig.get_facecolor(), bbox_inches='tight')
 
     buf.seek(0)
 
@@ -1284,7 +1278,6 @@ def _top_zone_transitions(df_s, top_k=14):
 
     for a, b, c, d in zip(sx, sy, ex, ey):
 
-        # Ignore events that start and end inside the same zone.
         if int(a) == int(c) and int(b) == int(d):
             continue
         transitions[(int(a), int(b), int(c), int(d))] += 1
@@ -1391,7 +1384,7 @@ def draw_zone_connections_map(df, title='Zone Connections - Origin to Destinatio
 
     buf = BytesIO()
 
-    fig.savefig(buf, format='png', dpi=FIG_DPI, facecolor=fig.get_facecolor())
+    fig.savefig(buf, format='png', dpi=FIG_DPI, facecolor=fig.get_facecolor(), bbox_inches='tight')
 
     buf.seek(0)
 
@@ -1485,7 +1478,7 @@ def draw_top_connection_minimaps(df, top_k=3, title='Top Zone Connections (Mini 
 
     buf = BytesIO()
 
-    fig.savefig(buf, format='png', dpi=FIG_DPI, facecolor=fig.get_facecolor())
+    fig.savefig(buf, format='png', dpi=FIG_DPI, facecolor=fig.get_facecolor(), bbox_inches='tight')
 
     buf.seek(0)
 
@@ -1633,7 +1626,6 @@ def plot_metric_line(metrics_df, key, label):
         st.info('No data available for this chart.')
 
         return
-
 
     y = metrics_df[key].astype(float).to_numpy()
 
