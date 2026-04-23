@@ -760,17 +760,63 @@ def compute_parallel_offsets(df, offset_step=1.5):
 
 
 
-def _action_style(is_won, is_top):
+def _draw_comet(ax, x0, y0, x1, y1, color, alpha, lw_scale):
 
-    if not is_won:
+    segs = 10
 
-        return 1.0, ':', 0.28, 12, 18
+    ts = np.linspace(0.0, 1.0, segs + 1)
 
-    if is_top:
+    for i in range(segs):
 
-        return 2.0, '--', 0.95, 22, 62
+        t0 = ts[i]
 
-    return 1.3, '--', 0.42, 14, 32
+        t1 = ts[i + 1]
+
+        xa = x0 + (x1 - x0) * t0
+
+        ya = y0 + (y1 - y0) * t0
+
+        xb = x0 + (x1 - x0) * t1
+
+        yb = y0 + (y1 - y0) * t1
+
+        seg_alpha = alpha * (0.12 + 0.88 * t1)
+
+        seg_lw = 0.55 + lw_scale * t1
+
+        ax.plot([xa, xb], [ya, yb], color=color, linewidth=seg_lw, alpha=seg_alpha,
+
+                zorder=4, solid_capstyle='round')
+
+    end_size = 16.0 + 10.0 * alpha
+
+    ax.scatter([x1], [y1], s=end_size, marker='o', c=[color],
+
+               edgecolors='white', linewidths=0.4, alpha=min(1.0, alpha + 0.15), zorder=6)
+
+
+
+def _action_visual(row, pos_ref):
+
+    if not row['is_won']:
+
+        return '#e96a6a', 0.30, 1.15, 0
+
+    dxt = float(row['delta_xt_adj'])
+
+    if dxt <= 0.0:
+
+        return '#b5becb', 0.14, 0.95, 1
+
+    rel = float(np.clip(dxt / (pos_ref + 1e-9), 0.0, 1.0))
+
+    color = matplotlib.colors.to_hex(plt.cm.Blues(0.35 + 0.60 * rel))
+
+    alpha = 0.30 + 0.65 * rel
+
+    lw_scale = 1.05 + 1.30 * rel
+
+    return color, alpha, lw_scale, 2
 
 
 
@@ -790,61 +836,42 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
 
 
-    top_idxs = set()
-
-    if not df.empty:
-
-        df_s = df[df['outcome'] == 'successful']
-
-        if not df_s.empty:
-
-            top_idxs = set(df_s.sort_values('delta_xt_adj', ascending=False).head(top_n_highlight).index)
-
-
-
     xs0_off, ys0_off, xs1_off, ys1_off = compute_parallel_offsets(df, offset_step=offset_step)
+
+    pos_vals = df.loc[(df['outcome'] == 'successful') & (df['delta_xt_adj'] > 0), 'delta_xt_adj'].to_numpy()
+
+    pos_ref = float(np.percentile(pos_vals, 90)) if pos_vals.size else 1.0
+
+    pos_ref = max(pos_ref, 1e-6)
 
 
 
     def draw_row(row, pos):
 
-        color = CMAP_ACTION(NORM_ACTION(float(row['xt_end'])))
-
-        is_top = row.name in top_idxs
-
-        lw, ls, alpha, s_start, s_end = _action_style(row['is_won'], is_top)
+        color, alpha, lw_scale, layer = _action_visual(row, pos_ref)
 
         ox0, oy0 = xs0_off[pos], ys0_off[pos]
 
         ox1, oy1 = xs1_off[pos], ys1_off[pos]
 
 
+        _draw_comet(ax, ox0, oy0, ox1, oy1, color=color, alpha=alpha, lw_scale=lw_scale)
 
-        ax.plot([ox0, ox1], [oy0, oy1], color=color, linestyle=ls, linewidth=lw, alpha=alpha, zorder=3, solid_capstyle='round')
-
-        pitch.scatter(ox0, oy0, s=s_start, marker='o', facecolors='none', edgecolors=color, linewidths=1.2 if is_top else 0.9, ax=ax, zorder=5, alpha=alpha)
-
-        pitch.scatter(ox1, oy1, s=s_end, marker='D', facecolors=color, edgecolors='white', linewidths=0.7 if is_top else 0.4, ax=ax, zorder=6, alpha=alpha)
+        return layer
 
 
 
-        if has_video_value(row['video']):
+    rows = list(df.iterrows())
 
-            pitch.scatter(ox0, oy0, s=s_start+40, marker='o', facecolors='none', edgecolors='#FFD54F', linewidths=1.8, ax=ax, zorder=7, alpha=alpha)
+    for pass_layer in (0, 1, 2):
 
+        for pos, (_, row) in enumerate(rows):
 
+            layer = _action_visual(row, pos_ref)[3]
 
-    for pos, (idx, row) in enumerate(df.iterrows()):
+            if layer == pass_layer:
 
-        if idx not in top_idxs:
-
-            draw_row(row, pos)
-
-    for pos, (idx, row) in enumerate(df.iterrows()):
-
-        if idx in top_idxs:
-
-            draw_row(row, pos)
+                draw_row(row, pos)
 
 
 
@@ -854,35 +881,25 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
     legend_items = [
 
-        ax.scatter([], [], s=18, marker='o', facecolors='none', edgecolors='#fd8d3c', linewidths=1.2, label='Origin'),
+        ax.plot([], [], color=matplotlib.colors.to_hex(plt.cm.Blues(0.80)), lw=2.0, alpha=0.85, label='Successful (+deltaxT)')[0],
 
-        ax.scatter([], [], s=45, marker='D', facecolors='#fd8d3c', edgecolors='white', linewidths=0.7, label='Destination'),
+        ax.plot([], [], color='#b5becb', lw=2.0, alpha=0.22, label='Successful (<=0 deltaxT)')[0],
 
-        ax.plot([], [], color='#fd8d3c', linestyle='--', lw=2.0, label=f'Top {top_n_highlight}')[0],
-
-        ax.plot([], [], color='#aaaaaa', linestyle=':', lw=1.0, label='Failed')[0],
+        ax.plot([], [], color='#e96a6a', lw=2.0, alpha=0.35, label='Failed')[0],
 
     ]
 
-    legend = ax.legend(handles=legend_items, loc='upper left', bbox_to_anchor=(0.01, 0.99), frameon=True, facecolor='#1a1a2e', edgecolor='#444466', fontsize='xx-small', labelspacing=0.35, borderpad=0.5, handletextpad=0.4)
+    legend = ax.legend(handles=legend_items, loc='upper left', bbox_to_anchor=(0.01, 0.99),
+
+                       frameon=True, facecolor='#1a1a2e', edgecolor='#444466',
+
+                       fontsize='xx-small', labelspacing=0.35, borderpad=0.5, handletextpad=0.4)
 
     for t in legend.get_texts():
 
         t.set_color('white')
 
     legend.get_frame().set_alpha(0.90)
-
-
-
-    sm = plt.cm.ScalarMappable(cmap=CMAP_ACTION, norm=NORM_ACTION)
-
-    cbar = fig.colorbar(sm, ax=ax, fraction=0.025, pad=0.01, shrink=0.72)
-
-    cbar.set_label('xT end', color='#cccccc', fontsize=7, labelpad=3)
-
-    cbar.ax.yaxis.set_tick_params(color='#cccccc', labelsize=6)
-
-    plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='#cccccc')
 
 
 
