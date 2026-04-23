@@ -906,13 +906,27 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
 
 
-def draw_corridor_heatmap(df, title='Heatmap de Zonas de Ação'):
+def draw_corridor_heatmap(df, title='Zone Heatmap - Completed Actions'):
 
     df_s = df[df['is_won']].copy()
 
-    
+    # White → light pink → salmon → red → dark red (matches ex.png style)
 
-    pitch = Pitch(pitch_type='statsbomb', pitch_color='#1a1a2e', line_color='#ffffff', line_alpha=0.15)
+    cmap_h = LinearSegmentedColormap.from_list(
+
+        'hex_heat',
+
+        ['#ffffff', '#fcc5c5', '#f07070', '#cc2020', '#7a0000'],
+
+        N=256
+
+    )
+
+    # line_zorder=3 ensures pitch markings render on top of hexagons (zorder=2)
+
+    pitch = Pitch(pitch_type='statsbomb', pitch_color='#1a1a2e',
+
+                  line_color='#ffffff', line_alpha=0.35, line_zorder=3)
 
     fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
 
@@ -924,45 +938,31 @@ def draw_corridor_heatmap(df, title='Heatmap de Zonas de Ação'):
 
     if not df_s.empty:
 
-        import seaborn as sns
+        # gridsize=15 gives ~170 hexagons across the pitch area
 
-        # Paleta de cores suave tipo plasma/magma, misturada com o fundo do campo
+        # mincnt=1 hides empty hexagons (they vanish into the dark background)
 
-        cmap_heatmap = LinearSegmentedColormap.from_list(
+        ax.hexbin(
 
-            'custom_heatmap',
+            df_s['x_end'],
 
-            [(0.0, '#1a1a2e'), (0.2, '#134074'), (0.5, '#CC2936'), (0.8, '#EBBF1A'), (1.0, '#FFFFFF')],
+            df_s['y_end'],
 
-            N=256
+            gridsize=15,
 
-        )
+            cmap=cmap_h,
 
-        
+            mincnt=1,
 
-        sns.kdeplot(
+            extent=[0, FIELD_X, 0, FIELD_Y],
 
-            x=df_s['x_end'],
-
-            y=df_s['y_end'],
-
-            ax=ax,
-
-            fill=True,
-
-            levels=100,
-
-            thresh=0.0,
-
-            cmap=cmap_heatmap,
-
-            alpha=0.8,
+            alpha=0.92,
 
             zorder=2,
 
-            clip=((0, FIELD_X), (0, FIELD_Y)),
+            linewidths=0.5,
 
-            bw_adjust=0.5
+            edgecolors='#1a1a2e'
 
         )
 
