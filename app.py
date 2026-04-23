@@ -906,7 +906,7 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
     pitch = Pitch(pitch_type='statsbomb', pitch_color='#1a1a2e', line_color='#ffffff', line_alpha=0.95)
 
     # Slightly reduce figure height and use a compact bottom strip for arrow + legend.
-    fig, ax = pitch.draw(figsize=(9, 6))
+    fig, ax = pitch.draw(figsize=(11, 7.7))
 
     fig.set_facecolor('#1a1a2e')
 
@@ -1052,7 +1052,7 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
     plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='#ffe6bf')
 
     # Tighten margins so the background area stays close to the pitch.
-    fig.subplots_adjust(left=0.035, right=0.965, top=0.92, bottom=0.165)
+    fig.subplots_adjust(left=0.025, right=0.865, top=0.82, bottom=0.105)
 
     # Place attack direction arrow/text AFTER tight_layout so positions are correct.
     fig.canvas.draw()
