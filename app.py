@@ -23,6 +23,7 @@ from matplotlib.patches import FancyArrowPatch, Rectangle
 from streamlit_image_coordinates import streamlit_image_coordinates
 
 from matplotlib.colors import Normalize, LinearSegmentedColormap
+from matplotlib.lines import Line2D
 
 from collections import defaultdict
 
@@ -902,7 +903,7 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
     pitch = Pitch(pitch_type='statsbomb', pitch_color='#1a1a2e', line_color='#ffffff', line_alpha=0.95)
 
-    fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
+    fig, ax = pitch.draw(figsize=(FIG_W * 1.45, FIG_H * 1.22))
 
     fig.set_facecolor('#1a1a2e')
 
@@ -1007,25 +1008,35 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
     legend_items = [
 
-        ax.plot([], [], color=matplotlib.colors.to_hex(plt.cm.YlOrRd(0.90)), lw=2.6, alpha=0.90, label='Successful (+deltaxT)')[0],
+        Line2D([0], [0], color=matplotlib.colors.to_hex(plt.cm.YlOrRd(0.90)), lw=2.8,
+               marker='h', markersize=7, markerfacecolor=matplotlib.colors.to_hex(plt.cm.YlOrRd(0.90)),
+               markeredgecolor='white', markeredgewidth=0.6, alpha=0.96,
+               label='Successful (+delta xT)'),
 
-        ax.plot([], [], color='#ffd64d', lw=2.2, alpha=0.18, label='Successful (<=0 deltaxT)')[0],
+        Line2D([0], [0], color='#ffd64d', lw=2.3,
+               marker='h', markersize=7, markerfacecolor='#ffd64d',
+               markeredgecolor='white', markeredgewidth=0.6, alpha=0.92,
+               label='Successful (<=0 delta xT)'),
 
-        ax.plot([], [], color='#aab2be', lw=2.2, alpha=0.30, label='Failed')[0],
+        Line2D([0], [0], color='#aab2be', lw=2.3,
+               marker='o', markersize=6.5, markerfacecolor='#aab2be',
+               markeredgecolor='white', markeredgewidth=0.6, alpha=0.90,
+               label='Failed'),
 
     ]
 
-    legend = ax.legend(handles=legend_items, loc='upper left', bbox_to_anchor=(0.01, 0.99),
+    legend = ax.legend(handles=legend_items, loc='upper center', bbox_to_anchor=(0.5, -0.07),
 
-                       frameon=True, facecolor='#1a1a2e', edgecolor='#444466',
+                       ncol=3, frameon=True, facecolor='#1a1a2e', edgecolor='#6b6b8f',
 
-                       fontsize='xx-small', labelspacing=0.35, borderpad=0.5, handletextpad=0.4)
+                       fontsize='x-small', labelspacing=0.35, borderpad=0.55, handletextpad=0.55,
+                       columnspacing=1.5)
 
     for t in legend.get_texts():
 
         t.set_color('white')
 
-    legend.get_frame().set_alpha(0.90)
+    legend.get_frame().set_alpha(0.98)
 
 
 
@@ -1047,7 +1058,7 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
 
 
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0.06, 1, 1])
 
     fig.canvas.draw()
 
@@ -1225,13 +1236,13 @@ def draw_zone_heatmaps_panel(df, title='Zone Heatmaps - Origin and Destination')
                         color='#ffffff' if val >= max(2, int(vmax_local * 0.35)) else '#1d1d1d',
                         fontweight='600')
 
-        ax.set_title(subtitle, fontsize=12, color='#ffffff', pad=7)
+        ax.set_title(subtitle, fontsize=15, color='#ffffff', pad=8, fontweight='700')
 
         ax.axhline(y=LANE_LEFT_MIN, color='#ffffff', lw=0.5, alpha=0.12, linestyle='--', zorder=3)
 
         ax.axhline(y=LANE_RIGHT_MAX, color='#ffffff', lw=0.5, alpha=0.12, linestyle='--', zorder=3)
 
-    fig.suptitle(title, fontsize=13, color='#ffffff', y=0.99)
+    fig.suptitle(title, fontsize=18, color='#ffffff', y=0.995, fontweight='700')
 
     fig.tight_layout(rect=[0, 0, 1, 0.965])
 
@@ -1267,6 +1278,9 @@ def _top_zone_transitions(df_s, top_k=14):
 
     for a, b, c, d in zip(sx, sy, ex, ey):
 
+        # Ignore events that start and end inside the same zone.
+        if int(a) == int(c) and int(b) == int(d):
+            continue
         transitions[(int(a), int(b), int(c), int(d))] += 1
 
     return sorted(transitions.items(), key=lambda kv: kv[1], reverse=True)[:top_k], x_bins, y_bins
@@ -1764,7 +1778,7 @@ tab_maps, tab_stats = st.tabs(['Maps', 'Stats'])
 
 with tab_maps:
 
-    col_filters, col_field, col_events = st.columns([0.95, 2.15, 1.2], gap='large')
+    col_filters, col_main = st.columns([0.95, 3.35], gap='large')
 
 
 
@@ -1842,9 +1856,10 @@ with tab_maps:
 
 
 
-    with col_field:
 
-        DISPLAY_WIDTH = 760
+    with col_main:
+
+        DISPLAY_WIDTH = 1120
 
         df_to_draw = df_base
 
@@ -1884,28 +1899,7 @@ with tab_maps:
 
 
 
-
-
-
-        with st.expander('Full Actions Data Table'):
-
-            dcols = ['number','type','outcome','direction','x_start','y_start','x_end','y_end','action_distance','xt_start','xt_end','delta_xt','dist_bonus','delta_xt_adj']
-
-            st.dataframe(df_to_draw[dcols].style.format({
-
-                'x_start':'{:.2f}','y_start':'{:.2f}','x_end':'{:.2f}','y_end':'{:.2f}',
-
-                'action_distance':'{:.1f}','xt_start':'{:.4f}','xt_end':'{:.4f}',
-
-                'delta_xt':'{:.4f}','dist_bonus':'{:.3f}','delta_xt_adj':'{:.4f}'
-
-            }), use_container_width=True, height=380)
-
-
-
-    with col_events:
-
-        st.subheader('Event Panel')
+        st.markdown('<h4 style="color:#ffffff;margin:6px 0 4px 0;">Event Panel</h4>', unsafe_allow_html=True)
 
         selected_action = st.session_state.get('selected_action', None)
 
@@ -1929,17 +1923,16 @@ with tab_maps:
 
             )
 
-            st.write(f'**Start:** ({selected_action.x_start:.2f}, {selected_action.y_start:.2f})')
+            c1, c2 = st.columns(2)
 
-            st.write(f'**End:** ({selected_action.x_end:.2f}, {selected_action.y_end:.2f})')
-
-            st.write(f'**Direction:** {selected_action["direction"].capitalize()}')
-
-            st.write(f'**Successful:** {"Yes" if selected_action["is_won"] else "No"}')
-
-            st.metric('Distance', f'{selected_action["action_distance"]:.1f}m')
-
-            st.metric('ΔxT', f'{selected_action["delta_xt_adj"]:.4f}')
+            with c1:
+                st.write(f'**Start:** ({selected_action.x_start:.2f}, {selected_action.y_start:.2f})')
+                st.write(f'**End:** ({selected_action.x_end:.2f}, {selected_action.y_end:.2f})')
+                st.write(f'**Direction:** {selected_action["direction"].capitalize()}')
+            with c2:
+                st.write(f'**Successful:** {"Yes" if selected_action["is_won"] else "No"}')
+                st.metric('Distance', f'{selected_action["action_distance"]:.1f}m')
+                st.metric('ΔxT', f'{selected_action["delta_xt_adj"]:.4f}')
 
             if has_video_value(selected_action['video']):
 
@@ -1956,9 +1949,6 @@ with tab_maps:
                 st.warning('No video attached to this event.')
 
 
-    col_spacer, col_wide_maps = st.columns([0.95, 3.35], gap='large')
-
-    with col_wide_maps:
 
         st.markdown('<h4 style="color:#ffffff;margin:8px 0 4px 0;">Zone Heatmaps</h4>', unsafe_allow_html=True)
 
@@ -1968,7 +1958,7 @@ with tab_maps:
 
         plt.close(hm_panel_fig)
 
-        st.markdown('<h4 style="color:#ffffff;margin:8px 0 4px 0;">Mini Maps - Top Conexões</h4>', unsafe_allow_html=True)
+        st.markdown('<h4 style="color:#ffffff;margin:8px 0 4px 0;">Mini Maps - Top Zone Connections</h4>', unsafe_allow_html=True)
 
         mini_img, _, mini_fig = draw_top_connection_minimaps(df_base, top_k=3)
 
