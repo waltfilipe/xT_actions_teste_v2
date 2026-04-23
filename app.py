@@ -905,8 +905,8 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
     pitch = Pitch(pitch_type='statsbomb', pitch_color='#1a1a2e', line_color='#ffffff', line_alpha=0.95)
 
-    # Slightly reduce figure height and use a compact bottom strip for arrow + legend.
-    fig, ax = pitch.draw(figsize=(11.2, 7.7))
+    # Pitch fills nearly all the figure; only a slim strip at bottom for arrow + legend.
+    fig, ax = pitch.draw(figsize=(11.5, 7.2))
 
     fig.set_facecolor('#1a1a2e')
 
@@ -1051,20 +1051,20 @@ def draw_action_map(df, title, top_n_highlight=20, offset_step=1.5):
 
     plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='#ffe6bf')
 
-    # Tighten margins so the background area stays close to the pitch.
-    fig.subplots_adjust(left=0.005, right=0.98, top=0.98, bottom=0.005)
+    # Pull the axes to fill nearly the whole figure; leave only what's needed below for arrow+legend.
+    fig.subplots_adjust(left=0.01, right=0.955, top=0.975, bottom=0.17)
 
-    # Place attack direction arrow/text AFTER tight_layout so positions are correct.
+    # Place attack direction arrow/text AFTER subplots_adjust so positions are final.
     fig.canvas.draw()
     ax_pos = ax.get_position()  # axes position in figure fraction
     cx = (ax_pos.x0 + ax_pos.x1) / 2
-    # Keep the arrow immediately below the pitch and the legend below the arrow.
-    strip_mid = ax_pos.y0 - 0.022
+    # Arrow sits just below the pitch bottom edge.
+    strip_mid = ax_pos.y0 - 0.016
     fig.patches.append(FancyArrowPatch(
         (cx - 0.055, strip_mid), (cx + 0.055, strip_mid),
         transform=fig.transFigure, arrowstyle='-|>',
         mutation_scale=14, linewidth=1.9, color='#cccccc'))
-    fig.text(cx, strip_mid - 0.010, 'Attack Direction',
+    fig.text(cx, strip_mid - 0.008, 'Attack Direction',
              ha='center', va='top', transform=fig.transFigure,
              fontsize=9.5, color='#cccccc')
 
@@ -1865,7 +1865,7 @@ with tab_maps:
 
     with col_main:
 
-        DISPLAY_WIDTH = 920
+        DISPLAY_WIDTH = 1120
 
         df_to_draw = df_base
 
@@ -2105,3 +2105,4 @@ with tab_stats:
 
 
     st.caption('Mapping: origin (ring), destination (diamond), color by xT End, and parallel lines for proximity-based groups.')
+
